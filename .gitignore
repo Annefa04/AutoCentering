@@ -1,0 +1,43 @@
+# Python environments and cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Private X-ray images and datasets
+dataset/
+input/
+output/
+
+# Training results and model weights
+runs/
+*.pt
+*.onnx
+
+# Visual Studio generated files
+.vs/
+x64/
+build/
+dist/
+*.user
+*.suo
+*.VC.db
+*.pdb
+*.obj
+*.ilk
+*.pch
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Company model files
+*.onnx
+*.pt
+
+# Bundled OpenCV binaries (keep locally)
+AutoCentering/3rdparty/opencv/
+
+# Generated build output
+AutoCentering/x64/
+AutoCentering/.vs/
