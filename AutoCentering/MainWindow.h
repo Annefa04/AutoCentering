@@ -6,6 +6,8 @@
 #include "ui_MainWindow.h"
 #include "YOLODetector.h"
 
+#include <QVariantAnimation>
+
 class AutoCentering : public QMainWindow
 {
     Q_OBJECT
@@ -17,6 +19,7 @@ public:
 private slots:
     void loadImage();
     void processImage();
+    void autoCenterImage();
 
 private:
     Ui::AutoCenteringClass ui;
@@ -24,5 +27,7 @@ private:
     QString currentImagePath;
     QImage currentImage;
 
-    YOLODetector* detector;
+    YOLODetector* detector = nullptr;
+    QVariantAnimation* shiftAnimation = nullptr;
 };
+
