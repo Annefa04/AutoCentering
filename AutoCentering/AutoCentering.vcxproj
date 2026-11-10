@@ -68,11 +68,11 @@
       <AdditionalOptions>/WX- %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_SILENCE_ALL_MS_EXT_DEPRECATION_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <AdditionalIncludeDirectories>C:\Users\R&amp;D\source\repos\XRayAutoCentering\AutoCentering\AutoCentering\3rdparty\opencv\x64\include;C:\Users\R&amp;D\onxx\onnxruntime-win-x64-1.31.1\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\R&amp;D\onxx\onnxruntime-win-x64-1.31.1\include;C:\Users\R&amp;D\opencv\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalLibraryDirectories>C:\Users\R&amp;D\source\repos\XRayAutoCentering\AutoCentering\AutoCentering\3rdparty\opencv\x64\lib;C:\Users\R&amp;D\onxx\onnxruntime-win-x64-1.31.1\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>onnxruntime.lib;opencv_world411.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>C:\Users\R&amp;D\opencv\build\x64\vc16\lib;C:\Users\R&amp;D\onxx\onnxruntime-win-x64-1.31.1\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>onnxruntime.lib;opencv_world4110d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'" Label="Configuration">
@@ -104,6 +104,8 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="GeometricRefinement.cpp" />
+    <ClCompile Include="OpenCVOnlyGeometry.cpp" />
     <ClCompile Include="YOLODetector.cpp" />
     <QtRcc Include="AutoCentering.qrc" />
     <QtUic Include="MainWindow.ui" />
@@ -112,6 +114,8 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="GeometricRefinement.h" />
+    <ClInclude Include="OpenCVOnlyGeometry.h" />
     <ClInclude Include="YOLODetector.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

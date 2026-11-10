@@ -40,6 +40,12 @@
     <ClCompile Include="YOLODetector.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="OpenCVOnlyGeometry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="GeometricRefinement.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <QtMoc Include="MainWindow.h">
@@ -48,6 +54,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="YOLODetector.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="OpenCVOnlyGeometry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GeometricRefinement.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

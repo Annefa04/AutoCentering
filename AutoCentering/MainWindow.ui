@@ -170,13 +170,6 @@
             </property>
            </widget>
           </item>
-          <item>
-           <widget class="QLabel" name="lblImageStatus">
-            <property name="text">
-             <string>Ready To Load Image</string>
-            </property>
-           </widget>
-          </item>
          </layout>
         </widget>
        </item>
@@ -248,7 +241,45 @@
              </font>
             </property>
             <property name="text">
-             <string>Process Image</string>
+             <string>YOLO </string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_OpenCVOnly">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>50</height>
+             </size>
+            </property>
+            <property name="font">
+             <font>
+              <pointsize>10</pointsize>
+              <bold>true</bold>
+             </font>
+            </property>
+            <property name="text">
+             <string>Geometric Refinement</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_yologf">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>50</height>
+             </size>
+            </property>
+            <property name="font">
+             <font>
+              <pointsize>10</pointsize>
+              <bold>true</bold>
+             </font>
+            </property>
+            <property name="text">
+             <string>YOLO + GF</string>
             </property>
            </widget>
           </item>
@@ -272,7 +303,7 @@
            </widget>
           </item>
           <item>
-           <widget class="QPushButton" name="btnSave">
+           <widget class="QPushButton" name="btnSave_2">
             <property name="minimumSize">
              <size>
               <width>0</width>
@@ -297,6 +328,11 @@
               <width>0</width>
               <height>180</height>
              </size>
+            </property>
+            <property name="font">
+             <font>
+              <pointsize>8</pointsize>
+             </font>
             </property>
             <property name="title">
              <string>Centering Status</string>
@@ -353,6 +389,18 @@
               <string>Confidence : 0 %</string>
              </property>
             </widget>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="lblImageStatus">
+            <property name="font">
+             <font>
+              <pointsize>8</pointsize>
+             </font>
+            </property>
+            <property name="text">
+             <string>Ready To Load Image</string>
+            </property>
            </widget>
           </item>
           <item>
