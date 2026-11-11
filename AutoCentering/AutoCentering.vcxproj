@@ -118,6 +118,14 @@
     <ClInclude Include="OpenCVOnlyGeometry.h" />
     <ClInclude Include="YOLODetector.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\..\Downloads\crosshair.svg" />
+    <None Include="..\..\..\Downloads\image-plus.svg" />
+    <None Include="..\..\..\Downloads\layers.svg" />
+    <None Include="..\..\..\Downloads\scan-search.svg" />
+    <None Include="..\..\..\Downloads\scan.svg" />
+    <None Include="dark_minimal.qss" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Condition="Exists('$(QtMsBuild)\qt.targets')">
     <Import Project="$(QtMsBuild)\qt.targets" />

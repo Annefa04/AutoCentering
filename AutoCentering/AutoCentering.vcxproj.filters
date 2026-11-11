@@ -21,6 +21,9 @@
       <UniqueIdentifier>{639EADAA-A684-42e4-A9AD-28FC9BCB8F7C}</UniqueIdentifier>
       <Extensions>ts</Extensions>
     </Filter>
+    <Filter Include="icons">
+      <UniqueIdentifier>{0ef915da-f9eb-4848-9521-a13ae183df73}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <QtRcc Include="AutoCentering.qrc">
@@ -62,5 +65,23 @@
     <ClInclude Include="GeometricRefinement.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="dark_minimal.qss" />
+    <None Include="..\..\..\Downloads\crosshair.svg">
+      <Filter>icons</Filter>
+    </None>
+    <None Include="..\..\..\Downloads\scan.svg">
+      <Filter>icons</Filter>
+    </None>
+    <None Include="..\..\..\Downloads\layers.svg">
+      <Filter>icons</Filter>
+    </None>
+    <None Include="..\..\..\Downloads\scan-search.svg">
+      <Filter>icons</Filter>
+    </None>
+    <None Include="..\..\..\Downloads\image-plus.svg">
+      <Filter>icons</Filter>
+    </None>
   </ItemGroup>
 </Project>

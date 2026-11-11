@@ -1,452 +1,738 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>AutoCenteringClass</class>
- <widget class="QMainWindow" name="AutoCenteringClass">
-  <property name="geometry">
-   <rect>
-    <x>0</x>
-    <y>0</y>
-    <width>1240</width>
-    <height>760</height>
-   </rect>
-  </property>
-  <property name="sizePolicy">
-   <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-    <horstretch>0</horstretch>
-    <verstretch>0</verstretch>
-   </sizepolicy>
-  </property>
-  <property name="font">
-   <font>
-    <pointsize>22</pointsize>
-    <bold>true</bold>
-   </font>
-  </property>
-  <property name="windowTitle">
-   <string>AutoCentering</string>
-  </property>
-  <widget class="QWidget" name="centralWidget">
-   <widget class="QWidget" name="verticalLayoutWidget">
-    <property name="geometry">
-     <rect>
-      <x>0</x>
-      <y>0</y>
-      <width>1198</width>
-      <height>733</height>
-     </rect>
-    </property>
-    <layout class="QVBoxLayout" name="mainveerticalLayout">
-     <property name="spacing">
-      <number>16</number>
-     </property>
-     <property name="leftMargin">
-      <number>20</number>
-     </property>
-     <property name="topMargin">
-      <number>16</number>
-     </property>
-     <property name="rightMargin">
-      <number>20</number>
-     </property>
-     <property name="bottomMargin">
-      <number>16</number>
-     </property>
-     <item>
-      <widget class="QFrame" name="headeframe">
-       <property name="enabled">
-        <bool>true</bool>
-       </property>
-       <property name="sizePolicy">
-        <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-         <horstretch>0</horstretch>
-         <verstretch>0</verstretch>
-        </sizepolicy>
-       </property>
-       <property name="minimumSize">
-        <size>
-         <width>0</width>
-         <height>80</height>
-        </size>
-       </property>
-       <property name="maximumSize">
-        <size>
-         <width>16777215</width>
-         <height>100</height>
-        </size>
-       </property>
-       <property name="frameShape">
-        <enum>QFrame::Shape::StyledPanel</enum>
-       </property>
-       <property name="frameShadow">
-        <enum>QFrame::Shadow::Raised</enum>
-       </property>
-       <layout class="QVBoxLayout" name="verticalLayout_2">
-        <item>
-         <widget class="QLabel" name="titlelabel">
-          <property name="sizePolicy">
-           <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-            <horstretch>0</horstretch>
-            <verstretch>0</verstretch>
-           </sizepolicy>
-          </property>
-          <property name="font">
-           <font>
-            <pointsize>22</pointsize>
-            <bold>true</bold>
-           </font>
-          </property>
-          <property name="text">
-           <string>X-Ray Auto Centering </string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLabel" name="Subtitlelabel">
-          <property name="font">
-           <font>
-            <pointsize>10</pointsize>
-           </font>
-          </property>
-          <property name="text">
-           <string>Vision-Based Automatic Component Alignment</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </widget>
-     </item>
-     <item>
-      <layout class="QHBoxLayout" name="horizontalLayout" stretch="3,1">
-       <item>
-        <widget class="QFrame" name="imagesframe">
-         <property name="minimumSize">
-          <size>
-           <width>800</width>
-           <height>600</height>
-          </size>
-         </property>
-         <property name="frameShape">
-          <enum>QFrame::Shape::StyledPanel</enum>
-         </property>
-         <property name="frameShadow">
-          <enum>QFrame::Shadow::Raised</enum>
-         </property>
-         <layout class="QVBoxLayout" name="verticalLayout_3">
-          <item>
-           <widget class="QLabel" name="lblimagetitle">
-            <property name="font">
-             <font>
-              <pointsize>16</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="inputMethodHints">
-             <set>Qt::InputMethodHint::ImhLatinOnly|Qt::InputMethodHint::ImhNoFullscreen</set>
-            </property>
-            <property name="text">
-             <string>Original Image</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QLabel" name="originalImageLabel">
-            <property name="sizePolicy">
-             <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-              <horstretch>0</horstretch>
-              <verstretch>0</verstretch>
-             </sizepolicy>
-            </property>
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>550</height>
-             </size>
-            </property>
-            <property name="text">
-             <string>No Image Loaded</string>
-            </property>
-            <property name="alignment">
-             <set>Qt::AlignmentFlag::AlignCenter</set>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </widget>
-       </item>
-       <item>
-        <widget class="QFrame" name="controlsframe">
-         <property name="minimumSize">
-          <size>
-           <width>350</width>
-           <height>400</height>
-          </size>
-         </property>
-         <property name="maximumSize">
-          <size>
-           <width>400</width>
-           <height>16777215</height>
-          </size>
-         </property>
-         <property name="frameShape">
-          <enum>QFrame::Shape::StyledPanel</enum>
-         </property>
-         <property name="frameShadow">
-          <enum>QFrame::Shadow::Raised</enum>
-         </property>
-         <layout class="QVBoxLayout" name="verticalLayout">
-          <item>
-           <widget class="QLabel" name="label">
-            <property name="font">
-             <font>
-              <pointsize>16</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="text">
-             <string>Controls</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="btnLoadImage">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>50</height>
-             </size>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>10</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="text">
-             <string>Load Image</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="btnProcess">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>50</height>
-             </size>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>10</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="text">
-             <string>YOLO </string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="btn_OpenCVOnly">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>50</height>
-             </size>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>10</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="text">
-             <string>Geometric Refinement</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="btn_yologf">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>50</height>
-             </size>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>10</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="text">
-             <string>YOLO + GF</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="btnAutoCenter">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>50</height>
-             </size>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>10</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="text">
-             <string>Auto Center</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QPushButton" name="btnSave_2">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>50</height>
-             </size>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>10</pointsize>
-              <bold>true</bold>
-             </font>
-            </property>
-            <property name="text">
-             <string>Save Result</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QGroupBox" name="StatusGroupBox">
-            <property name="minimumSize">
-             <size>
-              <width>0</width>
-              <height>180</height>
-             </size>
-            </property>
-            <property name="font">
-             <font>
-              <pointsize>8</pointsize>
-             </font>
-            </property>
-            <property name="title">
-             <string>Centering Status</string>
-            </property>
-            <widget class="QLabel" name="lblstatus">
-             <property name="geometry">
-              <rect>
-               <x>40</x>
-               <y>40</y>
-               <width>141</width>
-               <height>21</height>
-              </rect>
-             </property>
-             <property name="text">
-              <string>Status : Waiting</string>
-             </property>
-            </widget>
-            <widget class="QLabel" name="labeloffsetx">
-             <property name="geometry">
-              <rect>
-               <x>40</x>
-               <y>70</y>
-               <width>161</width>
-               <height>21</height>
-              </rect>
-             </property>
-             <property name="text">
-              <string>Center Offset  X : 0 px</string>
-             </property>
-            </widget>
-            <widget class="QLabel" name="labeloffsety">
-             <property name="geometry">
-              <rect>
-               <x>40</x>
-               <y>100</y>
-               <width>121</width>
-               <height>21</height>
-              </rect>
-             </property>
-             <property name="text">
-              <string>Center Offset Y : 0 px</string>
-             </property>
-            </widget>
-            <widget class="QLabel" name="labelconfidence">
-             <property name="geometry">
-              <rect>
-               <x>40</x>
-               <y>135</y>
-               <width>111</width>
-               <height>21</height>
-              </rect>
-             </property>
-             <property name="text">
-              <string>Confidence : 0 %</string>
-             </property>
-            </widget>
-           </widget>
-          </item>
-          <item>
-           <widget class="QLabel" name="lblImageStatus">
-            <property name="font">
-             <font>
-              <pointsize>8</pointsize>
-             </font>
-            </property>
-            <property name="text">
-             <string>Ready To Load Image</string>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <spacer name="verticalSpacer">
-            <property name="orientation">
-             <enum>Qt::Orientation::Vertical</enum>
-            </property>
-            <property name="sizeHint" stdset="0">
-             <size>
-              <width>20</width>
-              <height>40</height>
-             </size>
-            </property>
-           </spacer>
-          </item>
-         </layout>
-        </widget>
-       </item>
-      </layout>
-     </item>
-    </layout>
-   </widget>
-  </widget>
-  <widget class="QMenuBar" name="menuBar">
-   <property name="geometry">
-    <rect>
-     <x>0</x>
-     <y>0</y>
-     <width>1240</width>
-     <height>21</height>
-    </rect>
-   </property>
-  </widget>
-  <widget class="QToolBar" name="mainToolBar">
-   <attribute name="toolBarArea">
-    <enum>TopToolBarArea</enum>
-   </attribute>
-   <attribute name="toolBarBreak">
-    <bool>false</bool>
-   </attribute>
-  </widget>
-  <widget class="QStatusBar" name="statusBar"/>
- </widget>
- <layoutdefault spacing="6" margin="11"/>
- <resources>
-  <include location="AutoCentering.qrc"/>
- </resources>
- <connections/>
+	<class>AutoCenteringClass</class>
+	<widget class="QMainWindow" name="AutoCenteringClass">
+		<property name="geometry">
+			<rect>
+				<x>0</x>
+				<y>0</y>
+				<width>1280</width>
+				<height>800</height>
+			</rect>
+		</property>
+		<property name="sizePolicy">
+			<sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+				<horstretch>0</horstretch>
+				<verstretch>0</verstretch>
+			</sizepolicy>
+		</property>
+		<property name="windowTitle">
+			<string>X-Ray Auto Centering</string>
+		</property>
+		<widget class="QWidget" name="centralWidget">
+			<layout class="QVBoxLayout" name="mainveerticalLayout">
+				<property name="spacing">
+					<number>12</number>
+				</property>
+				<property name="leftMargin">
+					<number>16</number>
+				</property>
+				<property name="topMargin">
+					<number>12</number>
+				</property>
+				<property name="rightMargin">
+					<number>16</number>
+				</property>
+				<property name="bottomMargin">
+					<number>12</number>
+				</property>
+
+				<item>
+					<widget class="QFrame" name="headeframe">
+						<property name="sizePolicy">
+							<sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+								<horstretch>0</horstretch>
+								<verstretch>0</verstretch>
+							</sizepolicy>
+						</property>
+						<property name="minimumSize">
+							<size>
+								<width>0</width>
+								<height>75</height>
+							</size>
+						</property>
+						<property name="frameShape">
+							<enum>QFrame::Shape::StyledPanel</enum>
+						</property>
+						<property name="frameShadow">
+							<enum>QFrame::Shadow::Raised</enum>
+						</property>
+						<layout class="QVBoxLayout" name="verticalLayout_2">
+							<property name="spacing">
+								<number>4</number>
+							</property>
+							<item>
+								<widget class="QLabel" name="titlelabel">
+									<property name="font">
+										<font>
+											<pointsize>20</pointsize>
+											<bold>true</bold>
+										</font>
+									</property>
+									<property name="text">
+										<string>X-Ray Auto Centering</string>
+									</property>
+								</widget>
+							</item>
+							<item>
+								<widget class="QLabel" name="Subtitlelabel">
+									<property name="font">
+										<font>
+											<pointsize>10</pointsize>
+										</font>
+									</property>
+									<property name="text">
+										<string>Vision-Based Automatic Component Alignment</string>
+									</property>
+								</widget>
+							</item>
+						</layout>
+					</widget>
+				</item>
+
+				<item>
+					<layout class="QHBoxLayout" name="horizontalLayout" stretch="7,3">
+						<property name="spacing">
+							<number>12</number>
+						</property>
+
+						<item>
+							<widget class="QFrame" name="imagesframe">
+								<property name="sizePolicy">
+									<sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+										<horstretch>7</horstretch>
+										<verstretch>0</verstretch>
+									</sizepolicy>
+								</property>
+								<property name="minimumSize">
+									<size>
+										<width>0</width>
+										<height>0</height>
+									</size>
+								</property>
+								<property name="frameShape">
+									<enum>QFrame::Shape::StyledPanel</enum>
+								</property>
+								<property name="frameShadow">
+									<enum>QFrame::Shadow::Raised</enum>
+								</property>
+								<layout class="QVBoxLayout" name="verticalLayout_3">
+									<property name="spacing">
+										<number>8</number>
+									</property>
+									<property name="leftMargin">
+										<number>10</number>
+									</property>
+									<property name="topMargin">
+										<number>10</number>
+									</property>
+									<property name="rightMargin">
+										<number>10</number>
+									</property>
+									<property name="bottomMargin">
+										<number>10</number>
+									</property>
+									<item>
+										<widget class="QLabel" name="lblimagetitle">
+											<property name="sizePolicy">
+												<sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+													<horstretch>0</horstretch>
+													<verstretch>0</verstretch>
+												</sizepolicy>
+											</property>
+											<property name="font">
+												<font>
+													<pointsize>16</pointsize>
+													<bold>true</bold>
+												</font>
+											</property>
+											<property name="text">
+												<string>Original Image</string>
+											</property>
+										</widget>
+									</item>
+									<item>
+										<widget class="QLabel" name="originalImageLabel">
+											<property name="sizePolicy">
+												<sizepolicy hsizetype="Ignored" vsizetype="Expanding">
+													<horstretch>0</horstretch>
+													<verstretch>0</verstretch>
+												</sizepolicy>
+											</property>
+											<property name="minimumSize">
+												<size>
+													<width>0</width>
+													<height>0</height>
+												</size>
+											</property>
+											<property name="text">
+												<string>No Image Loaded</string>
+											</property>
+											<property name="scaledContents">
+												<bool>false</bool>
+											</property>
+											<property name="alignment">
+												<set>Qt::AlignmentFlag::AlignCenter</set>
+											</property>
+										</widget>
+									</item>
+								</layout>
+							</widget>
+						</item>
+
+						<item>
+							<widget class="QScrollArea" name="controlsScrollArea">
+								<property name="sizePolicy">
+									<sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+										<horstretch>3</horstretch>
+										<verstretch>0</verstretch>
+									</sizepolicy>
+								</property>
+								<property name="minimumSize">
+									<size>
+										<width>260</width>
+										<height>0</height>
+									</size>
+								</property>
+								<property name="horizontalScrollBarPolicy">
+									<enum>Qt::ScrollBarPolicy::ScrollBarAlwaysOff</enum>
+								</property>
+								<property name="widgetResizable">
+									<bool>true</bool>
+								</property>
+
+								<widget class="QFrame" name="controlsframe">
+									<property name="geometry">
+										<rect>
+											<x>0</x>
+											<y>0</y>
+											<width>368</width>
+											<height>622</height>
+										</rect>
+									</property>
+									<property name="sizePolicy">
+										<sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+											<horstretch>0</horstretch>
+											<verstretch>0</verstretch>
+										</sizepolicy>
+									</property>
+									<property name="minimumSize">
+										<size>
+											<width>0</width>
+											<height>0</height>
+										</size>
+									</property>
+									<property name="frameShape">
+										<enum>QFrame::Shape::StyledPanel</enum>
+									</property>
+									<property name="frameShadow">
+										<enum>QFrame::Shadow::Raised</enum>
+									</property>
+
+									<layout class="QVBoxLayout" name="verticalLayout">
+										<property name="spacing">
+											<number>10</number>
+										</property>
+										<property name="leftMargin">
+											<number>12</number>
+										</property>
+										<property name="topMargin">
+											<number>12</number>
+										</property>
+										<property name="rightMargin">
+											<number>12</number>
+										</property>
+										<property name="bottomMargin">
+											<number>12</number>
+										</property>
+
+										<item>
+											<widget class="QLabel" name="label">
+												<property name="font">
+													<font>
+														<pointsize>16</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="text">
+													<string>Controls</string>
+												</property>
+											</widget>
+										</item>
+
+										<item>
+											<widget class="QPushButton" name="btnLoadImage">
+												<property name="sizePolicy">
+													<sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+														<horstretch>0</horstretch>
+														<verstretch>0</verstretch>
+													</sizepolicy>
+												</property>
+												<property name="minimumSize">
+													<size>
+														<width>0</width>
+														<height>44</height>
+													</size>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>10</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="text">
+													<string>Load Image</string>
+												</property>
+												<property name="icon">
+													<iconset>
+														<normaloff>../../../Downloads/image-plus.svg</normaloff>../../../Downloads/image-plus.svg
+													</iconset>
+												</property>
+											</widget>
+										</item>
+
+										<item>
+											<widget class="QPushButton" name="btnProcess">
+												<property name="minimumSize">
+													<size>
+														<width>0</width>
+														<height>44</height>
+													</size>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>10</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="text">
+													<string>YOLO</string>
+												</property>
+												<property name="icon">
+													<iconset>
+														<normaloff>../../../Downloads/scan-search.svg</normaloff>../../../Downloads/scan-search.svg
+													</iconset>
+												</property>
+											</widget>
+										</item>
+
+										<item>
+											<widget class="QPushButton" name="btn_OpenCVOnly">
+												<property name="minimumSize">
+													<size>
+														<width>0</width>
+														<height>44</height>
+													</size>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>10</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="text">
+													<string>Geometric Refinement</string>
+												</property>
+												<property name="icon">
+													<iconset>
+														<normaloff>../../../Downloads/scan.svg</normaloff>../../../Downloads/scan.svg
+													</iconset>
+												</property>
+											</widget>
+										</item>
+
+										<item>
+											<widget class="QPushButton" name="btn_yologf">
+												<property name="minimumSize">
+													<size>
+														<width>0</width>
+														<height>44</height>
+													</size>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>10</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="text">
+													<string>YOLO + GF</string>
+												</property>
+												<property name="icon">
+													<iconset>
+														<normaloff>../../../Downloads/layers.svg</normaloff>../../../Downloads/layers.svg
+													</iconset>
+												</property>
+											</widget>
+										</item>
+
+										<item>
+											<widget class="QPushButton" name="btnAutoCenter">
+												<property name="minimumSize">
+													<size>
+														<width>0</width>
+														<height>44</height>
+													</size>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>10</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="text">
+													<string>Auto Center</string>
+												</property>
+												<property name="icon">
+													<iconset>
+														<normaloff>../../../Downloads/crosshair.svg</normaloff>../../../Downloads/crosshair.svg
+													</iconset>
+												</property>
+											</widget>
+										</item>
+
+										<!-- BATCH AUTO MODE -->
+										<item>
+											<widget class="QGroupBox" name="grpBatchAutoMode">
+												<property name="sizePolicy">
+													<sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+														<horstretch>0</horstretch>
+														<verstretch>0</verstretch>
+													</sizepolicy>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>9</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="title">
+													<string>Batch Auto Mode</string>
+												</property>
+
+												<layout class="QVBoxLayout" name="batchAutoLayout">
+													<property name="spacing">
+														<number>8</number>
+													</property>
+													<property name="leftMargin">
+														<number>10</number>
+													</property>
+													<property name="topMargin">
+														<number>10</number>
+													</property>
+													<property name="rightMargin">
+														<number>10</number>
+													</property>
+													<property name="bottomMargin">
+														<number>10</number>
+													</property>
+
+													<item>
+														<widget class="QLabel" name="lblBatchMethod">
+															<property name="text">
+																<string>Detection Method</string>
+															</property>
+														</widget>
+													</item>
+
+													<item>
+														<widget class="QComboBox" name="cmbBatchMethod">
+															<property name="minimumSize">
+																<size>
+																	<width>0</width>
+																	<height>36</height>
+																</size>
+															</property>
+															<item>
+																<property name="text">
+																	<string>YOLO</string>
+																</property>
+															</item>
+															<item>
+																<property name="text">
+																	<string>Geometric Refinement</string>
+																</property>
+															</item>
+															<item>
+																<property name="text">
+																	<string>YOLO + GR</string>
+																</property>
+															</item>
+														</widget>
+													</item>
+
+													<item>
+														<widget class="QLabel" name="lblBatchFolderTitle">
+															<property name="text">
+																<string>Input Folder</string>
+															</property>
+														</widget>
+													</item>
+
+													<item>
+														<widget class="QLabel" name="lblBatchFolder">
+															<property name="minimumSize">
+																<size>
+																	<width>0</width>
+																	<height>35</height>
+																</size>
+															</property>
+															<property name="text">
+																<string>No input folder selected</string>
+															</property>
+															<property name="wordWrap">
+																<bool>true</bool>
+															</property>
+															<property name="alignment">
+																<set>Qt::AlignLeft|Qt::AlignVCenter</set>
+															</property>
+															<property name="styleSheet">
+																<string notr="true">
+																	QLabel {
+																	background-color: #EEEEEE;
+																	color: #071B2B;
+																	border: 1px solid #B9E4E8;
+																	border-radius: 5px;
+																	padding: 6px;
+																	}
+																</string>
+															</property>
+														</widget>
+													</item>
+
+													<item>
+														<widget class="QPushButton" name="btnBrowseBatchFolder">
+															<property name="minimumSize">
+																<size>
+																	<width>0</width>
+																	<height>40</height>
+																</size>
+															</property>
+															<property name="font">
+																<font>
+																	<pointsize>9</pointsize>
+																	<bold>true</bold>
+																</font>
+															</property>
+															<property name="text">
+																<string>Browse Input Folder</string>
+															</property>
+															<property name="styleSheet">
+																<string notr="true">
+																	QPushButton {
+																	background-color: #167D8D;
+																	color: #EEEEEE;
+																	border: none;
+																	border-radius: 6px;
+																	padding: 8px;
+																	font-weight: bold;
+																	}
+																	QPushButton:hover {
+																	background-color: #0F6875;
+																	}
+																	QPushButton:pressed {
+																	background-color: #071B2B;
+																	}
+																</string>
+															</property>
+														</widget>
+													</item>
+
+													<item>
+														<widget class="QPushButton" name="btnStartBatch">
+															<property name="minimumSize">
+																<size>
+																	<width>0</width>
+																	<height>44</height>
+																</size>
+															</property>
+															<property name="font">
+																<font>
+																	<pointsize>9</pointsize>
+																	<bold>true</bold>
+																</font>
+															</property>
+															<property name="text">
+																<string>Start Batch Processing</string>
+															</property>
+															<property name="styleSheet">
+																<string notr="true">
+																	QPushButton {
+																	background-color: #071B2B;
+																	color: #EEEEEE;
+																	border: 1px solid #167D8D;
+																	border-radius: 6px;
+																	padding: 8px;
+																	font-weight: bold;
+																	}
+																	QPushButton:hover {
+																	background-color: #167D8D;
+																	}
+																	QPushButton:pressed {
+																	background-color: #0F6875;
+																	}
+																</string>
+															</property>
+														</widget>
+													</item>
+
+												</layout>
+											</widget>
+										</item>
+										<!-- END BATCH AUTO MODE -->
+
+										<item>
+											<widget class="QPushButton" name="btnSave_2">
+												<property name="minimumSize">
+													<size>
+														<width>0</width>
+														<height>44</height>
+													</size>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>10</pointsize>
+														<bold>true</bold>
+													</font>
+												</property>
+												<property name="text">
+													<string>Save Result</string>
+												</property>
+												<property name="icon">
+													<iconset theme="QIcon::ThemeIcon::DocumentSave"/>
+												</property>
+											</widget>
+										</item>
+
+										<item>
+											<widget class="QGroupBox" name="StatusGroupBox">
+												<property name="sizePolicy">
+													<sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+														<horstretch>0</horstretch>
+														<verstretch>0</verstretch>
+													</sizepolicy>
+												</property>
+												<property name="minimumSize">
+													<size>
+														<width>0</width>
+														<height>0</height>
+													</size>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>9</pointsize>
+													</font>
+												</property>
+												<property name="title">
+													<string>Centering Status</string>
+												</property>
+												<layout class="QVBoxLayout" name="statusLayout">
+													<property name="spacing">
+														<number>10</number>
+													</property>
+													<item>
+														<widget class="QLabel" name="lblstatus">
+															<property name="text">
+																<string>Status : Waiting</string>
+															</property>
+															<property name="wordWrap">
+																<bool>true</bool>
+															</property>
+														</widget>
+													</item>
+													<item>
+														<widget class="QLabel" name="labeloffsetx">
+															<property name="text">
+																<string>Center Offset X : 0 px</string>
+															</property>
+															<property name="wordWrap">
+																<bool>true</bool>
+															</property>
+														</widget>
+													</item>
+													<item>
+														<widget class="QLabel" name="labeloffsety">
+															<property name="text">
+																<string>Center Offset Y : 0 px</string>
+															</property>
+															<property name="wordWrap">
+																<bool>true</bool>
+															</property>
+														</widget>
+													</item>
+													<item>
+														<widget class="QLabel" name="labelconfidence">
+															<property name="text">
+																<string>Confidence : 0 %</string>
+															</property>
+															<property name="wordWrap">
+																<bool>true</bool>
+															</property>
+														</widget>
+													</item>
+												</layout>
+											</widget>
+										</item>
+
+										<item>
+											<widget class="QLabel" name="lblImageStatus">
+												<property name="sizePolicy">
+													<sizepolicy hsizetype="Expanding" vsizetype="Preferred">
+														<horstretch>0</horstretch>
+														<verstretch>0</verstretch>
+													</sizepolicy>
+												</property>
+												<property name="font">
+													<font>
+														<pointsize>8</pointsize>
+													</font>
+												</property>
+												<property name="text">
+													<string>Ready To Load Image</string>
+												</property>
+												<property name="wordWrap">
+													<bool>true</bool>
+												</property>
+											</widget>
+										</item>
+
+									</layout>
+								</widget>
+							</widget>
+						</item>
+					</layout>
+				</item>
+			</layout>
+		</widget>
+
+		<widget class="QMenuBar" name="menuBar">
+			<property name="geometry">
+				<rect>
+					<x>0</x>
+					<y>0</y>
+					<width>1280</width>
+					<height>21</height>
+				</rect>
+			</property>
+		</widget>
+
+		<widget class="QToolBar" name="mainToolBar">
+			<attribute name="toolBarArea">
+				<enum>TopToolBarArea</enum>
+			</attribute>
+			<attribute name="toolBarBreak">
+				<bool>false</bool>
+			</attribute>
+		</widget>
+
+		<widget class="QStatusBar" name="statusBar"/>
+	</widget>
+
+	<layoutdefault spacing="6" margin="11"/>
+
+	<resources>
+		<include location="AutoCentering.qrc"/>
+	</resources>
+
+	<connections/>
 </ui>
