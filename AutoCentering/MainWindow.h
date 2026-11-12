@@ -1,4 +1,3 @@
-
 #pragma once
 
 #include <QtWidgets/QMainWindow>
@@ -11,6 +10,9 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QElapsedTimer>
+#include <QProgressDialog>
+
+#include <atomic>
 
 #include <opencv2/opencv.hpp>
 
@@ -29,21 +31,43 @@ class AutoCentering : public QMainWindow
     Q_OBJECT
 
 public:
+
     AutoCentering(QWidget* parent = nullptr);
+
     ~AutoCentering();
+
 
 private slots:
 
-    // Single-image processing
+    // ========================================================
+    // SINGLE-IMAGE PROCESSING
+    // ========================================================
+
     void loadImage();
+
     void processImage();
+
     void processOpenCVOnly();
+
     void processYOLOGeometricRefinement();
+
     void autoCenterImage();
 
-    // Batch processing
+
+    // ========================================================
+    // BATCH PROCESSING
+    // ========================================================
+
     void browseBatchFolder();
+
     void startBatchAutoMode();
+
+
+    // ========================================================
+    // SAVE RESULT (single-image Auto Center)
+    // ========================================================
+
+    void saveResult();
 
 
 private:
@@ -62,6 +86,7 @@ private:
 
     DetectionMethod activeMethod = DetectionMethod::None;
 
+
     // ========================================================
     // REUSABLE CENTERING RESULT
     // ========================================================
@@ -71,20 +96,55 @@ private:
         bool success = false;
 
         cv::Mat correctedImage;
+
         cv::Mat previewImage;
 
         double rotationCorrection = 0.0;
 
         double translationX = 0.0;
+
         double translationY = 0.0;
 
         double finalOffsetX = 0.0;
+
         double finalOffsetY = 0.0;
 
         double confidence = -1.0;
 
+        // Used to replay the original -> corrected animation.
+        cv::Mat finalTransform;
+
+        cv::RotatedRect initialBox;
+
+        cv::Point2f initialCenter;
+
         QString errorMessage;
     };
+
+
+    // ========================================================
+    // BATCH SUMMARY (returned by the worker thread)
+    // ========================================================
+
+    struct BatchSummary
+    {
+        int total = 0;
+
+        int processed = 0;
+
+        int success = 0;
+
+        int failed = 0;
+
+        bool cancelled = false;
+
+        QString methodName;
+
+        QString outputDirectory;
+
+        QString errorMessage;
+    };
+
 
     // ========================================================
     // BATCH AUTO MODE
@@ -92,10 +152,23 @@ private:
 
     void setupBatchAutoMode();
 
+    void setProcessingState(bool processing);
+
+    // Returns immediately. The result arrives through batchWatcher.
     void processBatchImages(
         const QStringList& imagePaths,
         const QString& outputDirectory,
         DetectionMethod selectedMethod
+    );
+
+    // GUI thread only. Non-blocking: starts a timer-driven animation
+    // and clears batchAnimating when it finishes.
+    void playBatchAnimation(
+        const cv::Mat& originalSmall,
+        const cv::Mat& transformSmall,
+        const cv::RotatedRect& boxSmall,
+        const cv::Point2f& centerSmall,
+        int durationMs
     );
 
     CenteringResult processImageForCentering(
@@ -112,6 +185,7 @@ private:
         DetectionMethod method
     ) const;
 
+
     // ========================================================
     // UI
     // ========================================================
@@ -119,18 +193,49 @@ private:
     Ui::AutoCenteringClass ui;
 
     QComboBox* cmbBatchMethod = nullptr;
+
     QLabel* lblBatchFolder = nullptr;
+
     QPushButton* btnBrowseBatchFolder = nullptr;
+
     QPushButton* btnStartBatch = nullptr;
 
+    // Found by its text ("Save Result") in the constructor.
+    QPushButton* btnSaveResult = nullptr;
+
+
+    // ========================================================
+    // BATCH STATE
+    // ========================================================
+
     QString batchInputDirectory;
+
+    // Background batch watcher.
+    QFutureWatcher<BatchSummary>* batchWatcher = nullptr;
+
+    // Cancellation flag shared with the worker thread.
+    std::atomic<bool> batchCancelRequested{ false };
+
+    // True while the GUI is playing the per-image animation.
+    std::atomic<bool> batchAnimating{ false };
+
 
     // ========================================================
     // IMAGE DATA
     // ========================================================
 
     QString currentImagePath;
+
     QImage currentImage;
+
+    // Result of the last single-image Auto Center. Held in memory
+    // only; nothing is written to disk until "Save Result" is clicked.
+    cv::Mat pendingCorrectedImage;
+
+    cv::Mat pendingPreviewImage;
+
+    QString pendingBaseName;
+
 
     // ========================================================
     // DETECTION
@@ -139,7 +244,16 @@ private:
     QFutureWatcher<OpenCVOnlySegmentationResult>* openCVWatcher =
         nullptr;
 
+    QFutureWatcher<YOLOGuidedRefinementResult>* hybridWatcher =
+        nullptr;
+
+    bool isProcessing = false;
+
+    // YOLO confidence passed back from worker threads.
+    std::atomic<float> lastYoloConfidence{ -1.0f };
+
     YOLODetector* detector = nullptr;
+
 
     // ========================================================
     // ANIMATION

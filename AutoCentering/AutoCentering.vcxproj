@@ -119,11 +119,12 @@
     <ClInclude Include="YOLODetector.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\..\Downloads\crosshair.svg" />
-    <None Include="..\..\..\Downloads\image-plus.svg" />
-    <None Include="..\..\..\Downloads\layers.svg" />
-    <None Include="..\..\..\Downloads\scan-search.svg" />
-    <None Include="..\..\..\Downloads\scan.svg" />
+    <None Include="..\..\..\Downloads\Internship-haifa\crosshair.svg" />
+    <None Include="..\..\..\Downloads\Internship-haifa\image-plus.svg" />
+    <None Include="..\..\..\Downloads\Internship-haifa\layers.svg" />
+    <None Include="..\..\..\Downloads\Internship-haifa\scan-search.svg" />
+    <None Include="..\..\..\Downloads\Internship-haifa\scan.svg" />
+    <None Include="..\..\..\Downloads\Internship-haifa\yolo2.svg" />
     <None Include="dark_minimal.qss" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

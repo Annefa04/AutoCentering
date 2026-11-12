@@ -7,7 +7,9 @@
 
 GeometricRefinementResult GeometricRefinement::processFullImage(
     const cv::Mat& originalImage,
-    const std::string& outputDirectory)
+    const std::string& outputDirectory,
+    bool saveDiagnostics
+)
 {
     GeometricRefinementResult result;
 
@@ -79,7 +81,7 @@ GeometricRefinementResult GeometricRefinement::processFullImage(
         );
 
         // G1.6: Save diagnostic images
-        if (!outputDirectory.empty())
+        if (saveDiagnostics && !outputDirectory.empty())
         {
             std::filesystem::create_directories(outputDirectory);
 

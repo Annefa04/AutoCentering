@@ -22,5 +22,12 @@ public:
         const cv::Mat& originalImage,
         const std::string& outputDirectory = ""
     );
+
+
+    GeometricRefinementResult processFullImage(
+        const cv::Mat& originalImage,
+        const std::string& outputDirectory,
+        bool saveDiagnostics = true
+    );
 };
 #pragma once

@@ -201,3 +201,39 @@ QPushButton {
     text-align: left;
     spacing: 10px;
 }
+
+/* STATUS GROUP */
+QGroupBox#grpBatchAutoMode {
+    background-color: #071B2B;
+    color: #B9E4E8;
+    border: 1px solid #167D8D;
+    border-radius: 7px;
+    margin-top: 5px;
+    padding: 10px;
+    font-size: 10pt;
+    font-weight: bold;
+}
+
+/* STATUS LABELS */
+QLabel#lblBatchMethod,
+QLabel#labeloffsetx,
+QLabel#labeloffsety,
+QLabel#labelconfidence {
+    color: #EEEEEE;
+    background: transparent;
+    border: none;
+    font-size: 9pt;
+    padding: 4px;
+}
+
+/* STATUS LABELS */
+QLabel#lblBatchFolderTitle,
+QLabel#labeloffsetx,
+QLabel#labeloffsety,
+QLabel#labelconfidence {
+    color: #EEEEEE;
+    background: transparent;
+    border: none;
+    font-size: 9pt;
+    
+}
