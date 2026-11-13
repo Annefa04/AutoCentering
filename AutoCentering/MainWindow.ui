@@ -527,22 +527,8 @@
                 </font>
                </property>
                <property name="styleSheet">
-                <string notr="true">
-																	QPushButton {
-																	background-color: #071B2B;
-																	color: #EEEEEE;
-																	border: 1px solid #167D8D;
-																	border-radius: 6px;
-																	padding: 8px;
-																	font-weight: bold;
-																	}
-																	QPushButton:hover {
-																	background-color: #167D8D;
-																	}
-																	QPushButton:pressed {
-																	background-color: #0F6875;
-																	}
-																</string>
+                <string notr="true">				
+				</string>
                </property>
                <property name="text">
                 <string>Start Batch Processing</string>

@@ -45,14 +45,18 @@
 
 
 // ============================================================
-// HELPER FUNCTIONS
+// HELPER FUNCTIONS AND SETTINGS
 // ============================================================
 
 namespace
 {
-    // Batch animation settings. Set kBatchAnimationMs to 0 to
-    // skip the animation completely (fastest batch).
-    constexpr int kBatchAnimationMs = 1500;
+    // Batch animation length per image (ms).
+    // Set to 0 to skip the animation completely (fastest batch).
+    constexpr int kBatchAnimationMs = 600;
+
+    // Diagnostic images (many large PNG writes) are VERY slow.
+    // Keep this false for normal use. Set true only to debug.
+    constexpr bool kSaveDiagnostics = false;
 
     // Convert QImage to an independent OpenCV BGR image.
     cv::Mat qImageToBGR(const QImage& image)
@@ -2285,7 +2289,7 @@ void AutoCentering::startBatchAutoMode()
 // ============================================================
 //
 // The whole batch loop runs on ONE worker thread.
-// The worker never touches ui.* or batchProgress directly.
+// The worker never touches ui.* directly.
 // It sends progress to the GUI thread with queued invocations.
 // ============================================================
 
@@ -2317,13 +2321,23 @@ void AutoCentering::processBatchImages(
         outputDir.filePath("batch_results.csv");
 
     if (!QDir().mkpath(correctedDirectory) ||
-        !QDir().mkpath(previewDirectory) ||
-        !QDir().mkpath(diagnosticDirectory))
+        !QDir().mkpath(previewDirectory))
     {
         QMessageBox::critical(
             this,
             "Batch Processing Error",
             "Unable to create the output folders."
+        );
+
+        return;
+    }
+
+    if (kSaveDiagnostics && !QDir().mkpath(diagnosticDirectory))
+    {
+        QMessageBox::critical(
+            this,
+            "Batch Processing Error",
+            "Unable to create the diagnostics folder."
         );
 
         return;
@@ -2431,7 +2445,7 @@ void AutoCentering::processBatchImages(
     // --------------------------------------------------------
     // 4. THE WHOLE BATCH RUNS ON ONE WORKER THREAD
     // --------------------------------------------------------
-    // RULE: never touch ui.* or batchProgress directly in here.
+    // RULE: never touch ui.* directly in here.
 
     batchWatcher->setFuture(
         QtConcurrent::run(
@@ -2469,7 +2483,8 @@ void AutoCentering::processBatchImages(
                     << "rotation_correction_deg,"
                     << "translation_x_px,translation_y_px,"
                     << "final_offset_x_px,final_offset_y_px,"
-                    << "confidence,failure_reason\n";
+                    << "confidence,failure_reason,"
+                    << "det_cx,det_cy,det_w,det_h,det_angle\n";
 
                 auto csvField = [](const QString& value) -> QString
                     {
@@ -2536,15 +2551,26 @@ void AutoCentering::processBatchImages(
                             cv::IMREAD_COLOR
                         );
 
-                        const QString imageDiagnosticDirectory =
-                            QDir(diagnosticDirectory).filePath(uniqueName);
+                        // Empty path = no diagnostic images are written.
+                        QString imageDiagnosticDirectory;
+                        bool diagnosticFolderOk = true;
+
+                        if (kSaveDiagnostics)
+                        {
+                            imageDiagnosticDirectory =
+                                QDir(diagnosticDirectory)
+                                .filePath(uniqueName);
+
+                            diagnosticFolderOk =
+                                QDir().mkpath(imageDiagnosticDirectory);
+                        }
 
                         if (inputImage.empty())
                         {
                             failureReason =
                                 "Unable to read the input image.";
                         }
-                        else if (!QDir().mkpath(imageDiagnosticDirectory))
+                        else if (!diagnosticFolderOk)
                         {
                             failureReason =
                                 "Unable to create diagnostic folder.";
@@ -2574,11 +2600,16 @@ void AutoCentering::processBatchImages(
                                     QDir(previewDirectory).filePath(
                                         uniqueName + "_preview.png");
 
+                                // Fast PNG writes (no compression).
+                                const std::vector<int> fastPng = {
+                                    cv::IMWRITE_PNG_COMPRESSION, 1 };
+
                                 if (result.correctedImage.empty() ||
                                     !cv::imwrite(
                                         QFile::encodeName(correctedPath)
                                         .constData(),
-                                        result.correctedImage))
+                                        result.correctedImage,
+                                        fastPng))
                                 {
                                     failureReason =
                                         "Unable to save corrected image.";
@@ -2587,7 +2618,8 @@ void AutoCentering::processBatchImages(
                                     !cv::imwrite(
                                         QFile::encodeName(previewPath)
                                         .constData(),
-                                        result.previewImage))
+                                        result.previewImage,
+                                        fastPng))
                                 {
                                     failureReason =
                                         "Unable to save preview image.";
@@ -2641,7 +2673,7 @@ void AutoCentering::processBatchImages(
                                 cv::Size(), k, k, cv::INTER_AREA);
                         }
 
-                        // ---- ORIGINAL -> ROTATED/CORRECTED ANIMATION ----
+                        // ---- ORIGINAL -> CORRECTED ANIMATION ----
                         if (kBatchAnimationMs > 0 &&
                             !result.finalTransform.empty() &&
                             !originalSmall.empty() &&
@@ -2784,6 +2816,20 @@ void AutoCentering::processBatchImages(
                             QString::number(result.confidence, 'f', 4);
                     }
 
+                    // Detected box on the ORIGINAL image (used for the
+                    // precision / recall / F1 evaluation). Empty when the
+                    // first detection did not find the component.
+                    const bool hasDetection =
+                        result.initialBox.size.width > 0.0f &&
+                        result.initialBox.size.height > 0.0f;
+
+                    auto det = [&](double value) -> QString
+                        {
+                            return hasDetection
+                                ? QString::number(value, 'f', 2)
+                                : QString();
+                        };
+
                     csv << csvField(originalFileName) << ","
                         << csvField(methodName) << ","
                         << csvField(imageSuccess ? "SUCCESS" : "FAILED") << ","
@@ -2794,7 +2840,12 @@ void AutoCentering::processBatchImages(
                         << num(result.finalOffsetX) << ","
                         << num(result.finalOffsetY) << ","
                         << csvField(confidenceValue) << ","
-                        << csvField(failureReason)
+                        << csvField(failureReason) << ","
+                        << det(result.initialBox.center.x) << ","
+                        << det(result.initialBox.center.y) << ","
+                        << det(result.initialBox.size.width) << ","
+                        << det(result.initialBox.size.height) << ","
+                        << det(result.initialBox.angle)
                         << "\n";
 
                     csv.flush();
@@ -2886,32 +2937,32 @@ AutoCentering::processImageForCentering(
         );
 
         // 2. DIAGNOSTIC DIRECTORIES
-        QString diagnosticRoot = diagnosticDirectory;
+        // Empty paths are passed on when diagnostics are off, so the
+        // detection functions write nothing to disk (much faster).
+        QString initialDiagnostic;
+        QString rotatedDiagnostic;
+        QString finalDiagnostic;
 
-        if (diagnosticRoot.isEmpty())
+        if (kSaveDiagnostics && !diagnosticDirectory.isEmpty())
         {
-            diagnosticRoot =
-                QDir::tempPath() +
-                "/XRayAutoCenteringDiagnostics";
-        }
+            initialDiagnostic =
+                QDir(diagnosticDirectory).filePath("initial");
 
-        const QString initialDiagnostic =
-            QDir(diagnosticRoot).filePath("initial");
+            rotatedDiagnostic =
+                QDir(diagnosticDirectory).filePath("rotated");
 
-        const QString rotatedDiagnostic =
-            QDir(diagnosticRoot).filePath("rotated");
+            finalDiagnostic =
+                QDir(diagnosticDirectory).filePath("final");
 
-        const QString finalDiagnostic =
-            QDir(diagnosticRoot).filePath("final");
+            if (!QDir().mkpath(initialDiagnostic) ||
+                !QDir().mkpath(rotatedDiagnostic) ||
+                !QDir().mkpath(finalDiagnostic))
+            {
+                output.errorMessage =
+                    "Could not create diagnostic directories.";
 
-        if (!QDir().mkpath(initialDiagnostic) ||
-            !QDir().mkpath(rotatedDiagnostic) ||
-            !QDir().mkpath(finalDiagnostic))
-        {
-            output.errorMessage =
-                "Could not create diagnostic directories.";
-
-            return output;
+                return output;
+            }
         }
 
         // 3. DETECTION RESULT STRUCTURE

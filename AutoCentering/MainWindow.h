@@ -13,6 +13,7 @@
 #include <QProgressDialog>
 
 #include <atomic>
+#include <functional>
 
 #include <opencv2/opencv.hpp>
 
@@ -171,6 +172,7 @@ private:
         int durationMs
     );
 
+
     CenteringResult processImageForCentering(
         const cv::Mat& inputImage,
         DetectionMethod selectedMethod,
@@ -235,6 +237,20 @@ private:
     cv::Mat pendingPreviewImage;
 
     QString pendingBaseName;
+
+
+    // ========================================================
+    // MANUAL AUTO CENTER (runs on a worker thread)
+    // ========================================================
+
+    QFutureWatcher<CenteringResult>* autoCenterWatcher = nullptr;
+
+    // Per-run data used by the watcher's finished handler.
+    cv::Mat autoCenterOriginal;
+
+    QString autoCenterBaseName;
+
+    QString autoCenterMethodName;
 
 
     // ========================================================

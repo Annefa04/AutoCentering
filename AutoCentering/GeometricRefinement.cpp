@@ -1,9 +1,9 @@
-
 #include "GeometricRefinement.h"
 
 #include <opencv2/opencv.hpp>
 #include <filesystem>
 #include <exception>
+#include <vector>
 
 GeometricRefinementResult GeometricRefinement::processFullImage(
     const cv::Mat& originalImage,
@@ -80,29 +80,30 @@ GeometricRefinementResult GeometricRefinement::processFullImage(
             0.8
         );
 
-        // G1.6: Save diagnostic images
+        // G1.6: Save diagnostic images.
+        // Only the two useful stages are saved (the original and the
+        // grayscale image are just copies of the input), and with the
+        // PNG compression turned off so each write is much faster.
         if (saveDiagnostics && !outputDirectory.empty())
         {
             std::filesystem::create_directories(outputDirectory);
 
             const std::string separator = "/";
 
-            bool saved =
-                cv::imwrite(
-                    outputDirectory + separator + "g1_original.png",
-                    result.originalImage
-                ) &&
-                cv::imwrite(
-                    outputDirectory + separator + "g1_grayscale.png",
-                    result.grayscaleImage
-                ) &&
+            const std::vector<int> fastPng = {
+                cv::IMWRITE_PNG_COMPRESSION, 0
+            };
+
+            const bool saved =
                 cv::imwrite(
                     outputDirectory + separator + "g1_enhanced.png",
-                    result.enhancedImage
+                    result.enhancedImage,
+                    fastPng
                 ) &&
                 cv::imwrite(
                     outputDirectory + separator + "g1_blurred.png",
-                    result.blurredImage
+                    result.blurredImage,
+                    fastPng
                 );
 
             if (!saved)
