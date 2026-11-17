@@ -634,6 +634,9 @@ AutoCentering::~AutoCentering()
     if (batchWatcher && batchWatcher->isRunning())
         batchWatcher->waitForFinished();
 
+    if (autoCenterWatcher && autoCenterWatcher->isRunning())
+        autoCenterWatcher->waitForFinished();
+
     if (openCVWatcher && openCVWatcher->isRunning())
         openCVWatcher->waitForFinished();
 
@@ -1156,14 +1159,12 @@ void AutoCentering::processYOLOGeometricRefinement()
 
 void AutoCentering::autoCenterImage()
 {
-    struct DetectionInfo
-    {
-        bool found = false;
-        cv::Point2f center;
-        cv::RotatedRect box;
-        float confidence = -1.0f;
-        QString message;
-    };
+    // Heavy work (3 detections + 2 warps) runs on a worker thread.
+    // The UI thread only starts the job and, when it is finished,
+    // shows the result and plays the animation.
+
+    if (isProcessing)
+        return;
 
     auto setCenteringFailed = [this]()
         {
@@ -1207,20 +1208,25 @@ void AutoCentering::autoCenterImage()
     const DetectionMethod selectedMethod = activeMethod;
 
     QString methodName;
+    QString methodSuffix;
 
     switch (selectedMethod)
     {
     case DetectionMethod::YOLO:
         methodName = "YOLO";
+        methodSuffix = "_yolo";
         break;
     case DetectionMethod::GeometricRefinement:
         methodName = "Geometric Refinement";
+        methodSuffix = "_geometric";
         break;
     case DetectionMethod::YOLOGeometricRefinement:
         methodName = "YOLO + Geometric Refinement";
+        methodSuffix = "_yolo_geometric";
         break;
     default:
         methodName = "Unknown";
+        methodSuffix = "_unknown";
         break;
     }
 
@@ -1248,11 +1254,6 @@ void AutoCentering::autoCenterImage()
         shiftAnimation = nullptr;
     }
 
-    ui.lblstatus->setText("Status : Detecting Component...");
-    ui.labeloffsetx->setText("Center Offset X : Processing...");
-    ui.labeloffsety->setText("Center Offset Y : Processing...");
-    ui.labelconfidence->setText("Confidence : Processing...");
-
     cv::Mat original = qImageToBGR(currentImage);
 
     if (original.empty())
@@ -1268,24 +1269,17 @@ void AutoCentering::autoCenterImage()
         return;
     }
 
-    const int originalWidth = original.cols;
-    const int originalHeight = original.rows;
+    // Diagnostic images are only written when kSaveDiagnostics is true.
+    QString diagnosticDirectory;
 
-    const cv::Point2f outputCenter(
-        originalWidth / 2.0f,
-        originalHeight / 2.0f
-    );
-
-    std::string diagnosticDirectory;
-
-    if (selectedMethod == DetectionMethod::GeometricRefinement ||
-        selectedMethod == DetectionMethod::YOLOGeometricRefinement)
+    if (kSaveDiagnostics &&
+        selectedMethod != DetectionMethod::YOLO)
     {
-        const QString diagnosticFolder =
+        diagnosticDirectory =
             QDir::currentPath() +
             "/output/auto_center_geometry_diagnostics";
 
-        if (!QDir().mkpath(diagnosticFolder))
+        if (!QDir().mkpath(diagnosticDirectory))
         {
             setCenteringFailed();
 
@@ -1297,711 +1291,384 @@ void AutoCentering::autoCenterImage()
 
             return;
         }
-
-        diagnosticDirectory = diagnosticFolder.toStdString();
     }
 
-    // Common detection function for all three methods.
-    auto detectObject =
-        [this, selectedMethod](
-            const cv::Mat& inputImage,
-            const std::string& diagnosticPath
-            ) -> DetectionInfo
-        {
-            DetectionInfo info;
-
-            if (inputImage.empty())
-            {
-                info.message = "Input image is empty.";
-                return info;
-            }
-
-            // METHOD 1: YOLO
-            if (selectedMethod == DetectionMethod::YOLO)
-            {
-                if (!detector || !detector->isLoaded())
-                {
-                    info.message = "YOLO model is not loaded.";
-                    return info;
-                }
-
-                const CableDetection detection =
-                    detector->detect(inputImage);
-
-                if (!detection.found)
-                {
-                    info.message =
-                        "YOLO could not detect the component.";
-                    return info;
-                }
-
-                const float angleDegrees =
-                    detection.angleRadians * 180.0f /
-                    static_cast<float>(CV_PI);
-
-                info.center = detection.center;
-                info.box = cv::RotatedRect(
-                    detection.center,
-                    detection.size,
-                    angleDegrees
-                );
-                info.confidence = detection.confidence;
-                info.found = true;
-                info.message = "YOLO detection successful.";
-                return info;
-            }
-
-            // METHOD 2: GEOMETRIC REFINEMENT
-            if (selectedMethod == DetectionMethod::GeometricRefinement)
-            {
-                OpenCVOnlySegmentationResult result =
-                    OpenCVOnlyGeometry::segmentFullImage(
-                        inputImage,
-                        diagnosticPath
-                    );
-
-                if (!result.success || !result.outerContourFound)
-                {
-                    info.message =
-                        QString::fromStdString(result.message);
-                    return info;
-                }
-
-                const cv::RotatedRect box =
-                    result.outerRotatedBoundingBox;
-
-                if (box.size.width <= 0.0f ||
-                    box.size.height <= 0.0f)
-                {
-                    info.message =
-                        "Geometric Refinement returned an invalid bounding box.";
-                    return info;
-                }
-
-                info.center = box.center;
-                info.box = box;
-                info.confidence = -1.0f;
-                info.found = true;
-                info.message = "Geometric Refinement successful.";
-                return info;
-            }
-
-            // METHOD 3: YOLO + GEOMETRIC REFINEMENT
-            if (selectedMethod ==
-                DetectionMethod::YOLOGeometricRefinement)
-            {
-                if (!detector || !detector->isLoaded())
-                {
-                    info.message = "YOLO model is not loaded.";
-                    return info;
-                }
-
-                const CableDetection detection =
-                    detector->detect(inputImage);
-
-                if (!detection.found)
-                {
-                    info.message =
-                        "YOLO could not detect the component.";
-                    return info;
-                }
-
-                const float angleDegrees =
-                    detection.angleRadians * 180.0f /
-                    static_cast<float>(CV_PI);
-
-                const cv::RotatedRect yoloBox(
-                    detection.center,
-                    detection.size,
-                    angleDegrees
-                );
-
-                YOLOGuidedRefinementResult result =
-                    OpenCVOnlyGeometry::refineWithinYOLORegion(
-                        inputImage,
-                        yoloBox,
-                        diagnosticPath,
-                        0.25f
-                    );
-
-                if (!result.success || !result.refinedContourFound)
-                {
-                    info.message =
-                        QString::fromStdString(result.message);
-                    return info;
-                }
-
-                const cv::RotatedRect refinedBox =
-                    result.refinedRotatedBoundingBox;
-
-                if (refinedBox.size.width <= 0.0f ||
-                    refinedBox.size.height <= 0.0f)
-                {
-                    info.message = "Invalid refined bounding box.";
-                    return info;
-                }
-
-                info.center = refinedBox.center;
-                info.box = refinedBox;
-                info.confidence = detection.confidence;
-                info.found = true;
-                info.message =
-                    "YOLO + Geometric Refinement successful.";
-                return info;
-            }
-
-            info.message = "No detection method selected.";
-            return info;
-        };
-
-    // INITIAL DETECTION
-    DetectionInfo initialDetection;
-
-    try
-    {
-        initialDetection = detectObject(original, diagnosticDirectory);
-    }
-    catch (const std::exception& exception)
-    {
-        setCenteringFailed();
-
-        QMessageBox::critical(
-            this,
-            "Detection Error",
-            QString::fromLocal8Bit(exception.what())
-        );
-
-        return;
-    }
-
-    if (!initialDetection.found)
-    {
-        setCenteringFailed();
-
-        ui.lblImageStatus->setText(initialDetection.message);
-
-        QMessageBox::information(
-            this,
-            "Auto Center",
-            QString(
-                "%1 detection failed.\n\n%2\n\n"
-                "The original image remains unchanged."
-            )
-            .arg(methodName)
-            .arg(initialDetection.message)
-        );
-
-        return;
-    }
-
-    // ROTATION CORRECTION
-    const double correctionAngle =
-        calculateRotationCorrection(initialDetection.box);
-
-    // ROTATE IMAGE WITHOUT CROPPING
-    const cv::Point2f originalCenter(
-        original.cols / 2.0f,
-        original.rows / 2.0f
-    );
-
-    cv::Mat rotationMatrix =
-        cv::getRotationMatrix2D(originalCenter, correctionAngle, 1.0);
-
-    const double cosine =
-        std::abs(rotationMatrix.at<double>(0, 0));
-
-    const double sine =
-        std::abs(rotationMatrix.at<double>(0, 1));
-
-    const int rotatedWidth = std::max(
-        1,
-        static_cast<int>(
-            std::ceil(original.rows * sine + original.cols * cosine))
-    );
-
-    const int rotatedHeight = std::max(
-        1,
-        static_cast<int>(
-            std::ceil(original.rows * cosine + original.cols * sine))
-    );
-
-    rotationMatrix.at<double>(0, 2) +=
-        rotatedWidth / 2.0 - originalCenter.x;
-
-    rotationMatrix.at<double>(1, 2) +=
-        rotatedHeight / 2.0 - originalCenter.y;
-
-    cv::Mat rotated;
-
-    try
-    {
-        cv::warpAffine(
-            original,
-            rotated,
-            rotationMatrix,
-            cv::Size(rotatedWidth, rotatedHeight),
-            cv::INTER_LINEAR,
-            cv::BORDER_CONSTANT,
-            cv::Scalar(255, 255, 255)
-        );
-    }
-    catch (const cv::Exception& exception)
-    {
-        setCenteringFailed();
-
-        QMessageBox::critical(
-            this,
-            "Rotation Error",
-            QString::fromLocal8Bit(exception.what())
-        );
-
-        return;
-    }
-
-    // DETECT AFTER ROTATION
-    DetectionInfo rotatedDetection;
-
-    try
-    {
-        rotatedDetection = detectObject(rotated, diagnosticDirectory);
-    }
-    catch (const std::exception& exception)
-    {
-        setCenteringFailed();
-
-        QMessageBox::critical(
-            this,
-            "Detection Error",
-            QString::fromLocal8Bit(exception.what())
-        );
-
-        return;
-    }
-
-    if (!rotatedDetection.found)
-    {
-        setCenteringFailed();
-
-        QMessageBox::warning(
-            this,
-            "Auto Center",
-            QString(
-                "%1 could not detect the component after rotation.\n\n%2"
-            )
-            .arg(methodName)
-            .arg(rotatedDetection.message)
-        );
-
-        return;
-    }
-
-    // TRANSLATION
-    const double shiftX =
-        outputCenter.x - rotatedDetection.center.x;
-
-    const double shiftY =
-        outputCenter.y - rotatedDetection.center.y;
-
-    cv::Mat finalTransform = rotationMatrix.clone();
-
-    finalTransform.at<double>(0, 2) += shiftX;
-    finalTransform.at<double>(1, 2) += shiftY;
-
-    // CORRECTED IMAGE
-    cv::Mat corrected;
-
-    try
-    {
-        cv::warpAffine(
-            original,
-            corrected,
-            finalTransform,
-            cv::Size(originalWidth, originalHeight),
-            cv::INTER_CUBIC,
-            cv::BORDER_CONSTANT,
-            cv::Scalar(255, 255, 255)
-        );
-    }
-    catch (const cv::Exception& exception)
-    {
-        setCenteringFailed();
-
-        QMessageBox::critical(
-            this,
-            "Translation Error",
-            QString::fromLocal8Bit(exception.what())
-        );
-
-        return;
-    }
-
-    // FINAL DETECTION
-    DetectionInfo finalDetection;
-
-    try
-    {
-        finalDetection = detectObject(corrected, diagnosticDirectory);
-    }
-    catch (const std::exception& exception)
-    {
-        setCenteringFailed();
-
-        QMessageBox::critical(
-            this,
-            "Final Detection Error",
-            QString::fromLocal8Bit(exception.what())
-        );
-
-        return;
-    }
-
-    if (!finalDetection.found)
-    {
-        setCenteringFailed();
-
-        QMessageBox::warning(
-            this,
-            "Final Detection Failed",
-            QString(
-                "The corrected image was created, but final detection failed.\n\n%1"
-            )
-            .arg(finalDetection.message)
-        );
-
-        return;
-    }
-
-    // FINAL PREVIEW
-    cv::Mat preview = corrected.clone();
-
-    drawRotatedBox(
-        preview,
-        finalDetection.box,
-        cv::Scalar(0, 255, 0),
-        3
-    );
-
-    cv::circle(
-        preview,
-        finalDetection.center,
-        6,
-        cv::Scalar(0, 0, 255),
-        cv::FILLED,
-        cv::LINE_AA
-    );
-
-    cv::drawMarker(
-        preview,
-        cv::Point(originalWidth / 2, originalHeight / 2),
-        cv::Scalar(255, 0, 0),
-        cv::MARKER_CROSS,
-        25,
-        2,
-        cv::LINE_AA
-    );
-
-    // NOTE: nothing is written to disk here. The corrected image and
-    // the preview are kept in memory, and are only saved when the
-    // user clicks "Save Result".
     QString baseName =
         QFileInfo(currentImagePath).completeBaseName();
 
     if (baseName.isEmpty())
         baseName = "xray_image";
 
-    QString methodSuffix;
+    const QString resultBaseName = baseName + methodSuffix;
 
-    switch (selectedMethod)
-    {
-    case DetectionMethod::YOLO:
-        methodSuffix = "_yolo";
-        break;
-    case DetectionMethod::GeometricRefinement:
-        methodSuffix = "_geometric";
-        break;
-    case DetectionMethod::YOLOGeometricRefinement:
-        methodSuffix = "_yolo_geometric";
-        break;
-    default:
-        methodSuffix = "_unknown";
-        break;
-    }
+    // Lock the buttons while the worker thread is running.
+    setProcessingState(true);
 
-    pendingCorrectedImage = corrected.clone();
-    pendingPreviewImage = preview.clone();
-    pendingBaseName = baseName + methodSuffix;
-
-    const QImage finalDisplayImage = bgrToQImage(preview);
-
-    if (finalDisplayImage.isNull())
-    {
-        setCenteringFailed();
-
-        QMessageBox::warning(
-            this,
-            "Display Error",
-            "Could not prepare the final preview."
-        );
-
-        return;
-    }
-
-    // ANIMATION DATA
-    const cv::Mat animationImage = original.clone();
-    const cv::RotatedRect animationBox = initialDetection.box;
-    const cv::Point2f animationCenter = initialDetection.center;
-    const cv::Mat animationTransform = finalTransform.clone();
-
-    // UPDATE UI
-    if (initialDetection.confidence >= 0.0f)
-    {
-        ui.labelconfidence->setText(
-            QString("Confidence : %1 %")
-            .arg(initialDetection.confidence * 100.0f, 0, 'f', 2)
-        );
-    }
-    else
-    {
-        ui.labelconfidence->setText("Confidence : N/A (OpenCV)");
-    }
-
-    ui.lblstatus->setText("Status : Starting Auto Center...");
-
+    ui.lblstatus->setText("Status : Auto Center Running...");
+    ui.labeloffsetx->setText("Center Offset X : Processing...");
+    ui.labeloffsety->setText("Center Offset Y : Processing...");
+    ui.labelconfidence->setText("Confidence : Processing...");
     ui.lblImageStatus->setText(
-        QString(
-            "%1 Auto Center\n"
-            "Rotation correction: %2 degrees\n"
-            "Translation X: %3 px\n"
-            "Translation Y: %4 px\n"
-            "Preparing centering animation..."
-        )
+        QString("%1 Auto Center\nDetecting and centering the component...")
         .arg(methodName)
-        .arg(correctionAngle, 0, 'f', 2)
-        .arg(shiftX, 0, 'f', 1)
-        .arg(shiftY, 0, 'f', 1)
     );
 
-    // START ANIMATION
-    shiftAnimation = new QVariantAnimation(this);
+    if (!autoCenterWatcher)
+    {
+        autoCenterWatcher =
+            new QFutureWatcher<CenteringResult>(this);
+    }
 
-    shiftAnimation->setDuration(4000);
-    shiftAnimation->setStartValue(0.0);
-    shiftAnimation->setEndValue(1.0);
-    shiftAnimation->setEasingCurve(QEasingCurve::InOutSine);
-
+    // One-shot: this handler belongs to THIS run only.
     connect(
-        shiftAnimation,
-        &QVariantAnimation::valueChanged,
+        autoCenterWatcher,
+        &QFutureWatcher<CenteringResult>::finished,
         this,
-        [
-            this,
-            animationImage,
-            animationBox,
-            animationCenter,
-            animationTransform,
-            outputCenter,
-            originalWidth,
-            originalHeight
-        ](const QVariant& value)
+        [this, original, methodName, resultBaseName, setCenteringFailed]()
         {
-            const double progress = value.toDouble();
+            const CenteringResult result =
+                autoCenterWatcher->result();
 
-            // Interpolate affine transformation.
-            cv::Mat currentTransform = cv::Mat::eye(2, 3, CV_64F);
+            setProcessingState(false);
 
-            for (int row = 0; row < 2; ++row)
+            if (!result.success)
             {
-                for (int column = 0; column < 3; ++column)
-                {
-                    const double startValue =
-                        row == column ? 1.0 : 0.0;
+                setCenteringFailed();
 
-                    const double finalValue =
-                        animationTransform.at<double>(row, column);
+                ui.lblImageStatus->setText(result.errorMessage);
 
-                    currentTransform.at<double>(row, column) =
-                        startValue +
-                        (finalValue - startValue) * progress;
-                }
-            }
-
-            cv::Mat frame;
-
-            cv::warpAffine(
-                animationImage,
-                frame,
-                currentTransform,
-                cv::Size(originalWidth, originalHeight),
-                cv::INTER_LINEAR,
-                cv::BORDER_CONSTANT,
-                cv::Scalar(255, 255, 255)
-            );
-
-            // Transform bounding box.
-            cv::Point2f corners[4];
-
-            animationBox.points(corners);
-
-            for (int i = 0; i < 4; ++i)
-            {
-                const cv::Point2f point = corners[i];
-
-                corners[i] = cv::Point2f(
-                    static_cast<float>(
-                        currentTransform.at<double>(0, 0) * point.x +
-                        currentTransform.at<double>(0, 1) * point.y +
-                        currentTransform.at<double>(0, 2)),
-                    static_cast<float>(
-                        currentTransform.at<double>(1, 0) * point.x +
-                        currentTransform.at<double>(1, 1) * point.y +
-                        currentTransform.at<double>(1, 2))
+                QMessageBox::warning(
+                    this,
+                    "Auto Center",
+                    QString(
+                        "%1 Auto Center failed.\n\n%2\n\n"
+                        "The original image remains unchanged."
+                    )
+                    .arg(methodName)
+                    .arg(result.errorMessage)
                 );
+
+                return;
             }
 
-            for (int i = 0; i < 4; ++i)
+            // Keep the result in memory. Nothing is written to disk
+            // until the user clicks "Save Result".
+            pendingCorrectedImage = result.correctedImage.clone();
+            pendingPreviewImage = result.previewImage.clone();
+            pendingBaseName = resultBaseName;
+
+            const QImage finalDisplayImage =
+                bgrToQImage(result.previewImage);
+
+            if (finalDisplayImage.isNull())
             {
-                cv::line(
-                    frame,
-                    corners[i],
-                    corners[(i + 1) % 4],
-                    cv::Scalar(0, 255, 0),
-                    3,
-                    cv::LINE_AA
+                setCenteringFailed();
+
+                QMessageBox::warning(
+                    this,
+                    "Display Error",
+                    "Could not prepare the final preview."
                 );
+
+                return;
             }
 
-            // Transform component centre.
-            const cv::Point2f movingCenter(
-                static_cast<float>(
-                    currentTransform.at<double>(0, 0) * animationCenter.x +
-                    currentTransform.at<double>(0, 1) * animationCenter.y +
-                    currentTransform.at<double>(0, 2)),
-                static_cast<float>(
-                    currentTransform.at<double>(1, 0) * animationCenter.x +
-                    currentTransform.at<double>(1, 1) * animationCenter.y +
-                    currentTransform.at<double>(1, 2))
+            const double correctionAngle = result.rotationCorrection;
+            const double finalOffsetX = result.finalOffsetX;
+            const double finalOffsetY = result.finalOffsetY;
+            const int originalWidth = original.cols;
+            const int originalHeight = original.rows;
+
+            ui.labelconfidence->setText(
+                result.confidence >= 0.0
+                ? QString("Confidence : %1 %")
+                .arg(result.confidence * 100.0, 0, 'f', 2)
+                : QString("Confidence : N/A (OpenCV)")
             );
 
-            cv::circle(
-                frame,
-                movingCenter,
-                6,
-                cv::Scalar(0, 0, 255),
-                cv::FILLED,
-                cv::LINE_AA
-            );
-
-            // Target centre.
-            cv::drawMarker(
-                frame,
-                cv::Point(originalWidth / 2, originalHeight / 2),
-                cv::Scalar(255, 0, 0),
-                cv::MARKER_CROSS,
-                25,
-                2,
-                cv::LINE_AA
-            );
-
-            displayImage(
-                ui.originalImageLabel,
-                bgrToQImage(frame)
-            );
-
-            const double remainingX = movingCenter.x - outputCenter.x;
-            const double remainingY = movingCenter.y - outputCenter.y;
-
-            ui.labeloffsetx->setText(
-                QString("Center Offset X : %1 px")
-                .arg(remainingX, 0, 'f', 1)
-            );
-
-            ui.labeloffsety->setText(
-                QString("Center Offset Y : %1 px")
-                .arg(remainingY, 0, 'f', 1)
-            );
-
-            if (progress < 1.0)
-            {
-                ui.lblstatus->setText(
-                    QString("Status : Auto Centering %1%")
-                    .arg(static_cast<int>(progress * 100.0))
-                );
-            }
-        }
-    );
-
-    connect(
-        shiftAnimation,
-        &QVariantAnimation::finished,
-        this,
-        [
-            this,
-            finalDisplayImage,
-            finalDetection,
-            originalWidth,
-            originalHeight,
-            correctionAngle,
-            methodName
-        ]()
-        {
-            displayImage(ui.originalImageLabel, finalDisplayImage);
-
-            const double finalOffsetX =
-                finalDetection.center.x - originalWidth / 2.0;
-
-            const double finalOffsetY =
-                finalDetection.center.y - originalHeight / 2.0;
-
-            ui.lblstatus->setText("Status : Completed");
-
-            ui.labeloffsetx->setText(
-                QString("Center Offset X : %1 px")
-                .arg(finalOffsetX, 0, 'f', 2)
-            );
-
-            ui.labeloffsety->setText(
-                QString("Center Offset Y : %1 px")
-                .arg(finalOffsetY, 0, 'f', 2)
-            );
-
-            if (finalDetection.confidence >= 0.0f)
-            {
-                ui.labelconfidence->setText(
-                    QString("Confidence : %1 %")
-                    .arg(finalDetection.confidence * 100.0f, 0, 'f', 2)
-                );
-            }
-            else
-            {
-                ui.labelconfidence->setText("Confidence : N/A (OpenCV)");
-            }
+            ui.lblstatus->setText("Status : Starting Auto Center...");
 
             ui.lblImageStatus->setText(
                 QString(
-                    "%1 Auto Center completed.\n"
-                    "Output dimensions: %2 x %3 px\n"
-                    "Rotation correction: %4 degrees\n"
-                    "Final offset X: %5 px\n"
-                    "Final offset Y: %6 px\n\n"
-                    "Not saved yet. Click Save Result to save."
+                    "%1 Auto Center\n"
+                    "Rotation correction: %2 degrees\n"
+                    "Translation X: %3 px\n"
+                    "Translation Y: %4 px\n"
+                    "Preparing centering animation..."
                 )
                 .arg(methodName)
-                .arg(originalWidth)
-                .arg(originalHeight)
                 .arg(correctionAngle, 0, 'f', 2)
-                .arg(finalOffsetX, 0, 'f', 2)
-                .arg(finalOffsetY, 0, 'f', 2)
+                .arg(result.translationX, 0, 'f', 1)
+                .arg(result.translationY, 0, 'f', 1)
             );
 
-            if (shiftAnimation)
+            // ------------------------------------------------
+            // ANIMATION (on a downscaled copy, so it stays smooth)
+            // ------------------------------------------------
+
+            const int longest = std::max(original.cols, original.rows);
+
+            const double k =
+                longest > 1200 ? 1200.0 / longest : 1.0;
+
+            cv::Mat animationImage = original;
+
+            if (k < 1.0)
             {
-                shiftAnimation->deleteLater();
-                shiftAnimation = nullptr;
+                cv::resize(
+                    original,
+                    animationImage,
+                    cv::Size(),
+                    k,
+                    k,
+                    cv::INTER_AREA
+                );
             }
-        }
+
+            // Same rotation, translation scaled by k.
+            cv::Mat animationTransform = result.finalTransform.clone();
+
+            animationTransform.at<double>(0, 2) *= k;
+            animationTransform.at<double>(1, 2) *= k;
+
+            const cv::RotatedRect animationBox(
+                cv::Point2f(
+                    static_cast<float>(result.initialBox.center.x * k),
+                    static_cast<float>(result.initialBox.center.y * k)),
+                cv::Size2f(
+                    static_cast<float>(result.initialBox.size.width * k),
+                    static_cast<float>(result.initialBox.size.height * k)),
+                result.initialBox.angle
+            );
+
+            const cv::Point2f animationCenter(
+                static_cast<float>(result.initialCenter.x * k),
+                static_cast<float>(result.initialCenter.y * k)
+            );
+
+            const int frameWidth = animationImage.cols;
+            const int frameHeight = animationImage.rows;
+
+            const cv::Point2f targetCenter(
+                frameWidth / 2.0f,
+                frameHeight / 2.0f
+            );
+
+            shiftAnimation = new QVariantAnimation(this);
+
+            shiftAnimation->setDuration(3000);
+            shiftAnimation->setStartValue(0.0);
+            shiftAnimation->setEndValue(1.0);
+            shiftAnimation->setEasingCurve(QEasingCurve::InOutSine);
+
+            connect(
+                shiftAnimation,
+                &QVariantAnimation::valueChanged,
+                this,
+                [
+                    this,
+                    animationImage,
+                    animationBox,
+                    animationCenter,
+                    animationTransform,
+                    targetCenter,
+                    frameWidth,
+                    frameHeight
+                ](const QVariant& value)
+                {
+                    const double progress = value.toDouble();
+
+                    // Interpolate identity -> final affine transform.
+                    cv::Mat currentTransform =
+                        cv::Mat::eye(2, 3, CV_64F);
+
+                    for (int row = 0; row < 2; ++row)
+                    {
+                        for (int column = 0; column < 3; ++column)
+                        {
+                            const double startValue =
+                                row == column ? 1.0 : 0.0;
+
+                            const double finalValue =
+                                animationTransform.at<double>(row, column);
+
+                            currentTransform.at<double>(row, column) =
+                                startValue +
+                                (finalValue - startValue) * progress;
+                        }
+                    }
+
+                    cv::Mat frame;
+
+                    cv::warpAffine(
+                        animationImage,
+                        frame,
+                        currentTransform,
+                        cv::Size(frameWidth, frameHeight),
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar(255, 255, 255)
+                    );
+
+                    auto apply = [&currentTransform](
+                        const cv::Point2f& p)
+                        {
+                            return cv::Point2f(
+                                static_cast<float>(
+                                    currentTransform.at<double>(0, 0) * p.x +
+                                    currentTransform.at<double>(0, 1) * p.y +
+                                    currentTransform.at<double>(0, 2)),
+                                static_cast<float>(
+                                    currentTransform.at<double>(1, 0) * p.x +
+                                    currentTransform.at<double>(1, 1) * p.y +
+                                    currentTransform.at<double>(1, 2))
+                            );
+                        };
+
+                    // Moving bounding box.
+                    cv::Point2f corners[4];
+
+                    animationBox.points(corners);
+
+                    for (int i = 0; i < 4; ++i)
+                        corners[i] = apply(corners[i]);
+
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        cv::line(
+                            frame,
+                            corners[i],
+                            corners[(i + 1) % 4],
+                            cv::Scalar(0, 255, 0),
+                            2,
+                            cv::LINE_AA
+                        );
+                    }
+
+                    // Moving component centre.
+                    const cv::Point2f movingCenter =
+                        apply(animationCenter);
+
+                    cv::circle(
+                        frame,
+                        movingCenter,
+                        5,
+                        cv::Scalar(0, 0, 255),
+                        cv::FILLED,
+                        cv::LINE_AA
+                    );
+
+                    // Target centre.
+                    cv::drawMarker(
+                        frame,
+                        cv::Point(
+                            static_cast<int>(targetCenter.x),
+                            static_cast<int>(targetCenter.y)),
+                        cv::Scalar(255, 0, 0),
+                        cv::MARKER_CROSS,
+                        20,
+                        2,
+                        cv::LINE_AA
+                    );
+
+                    displayImage(
+                        ui.originalImageLabel,
+                        bgrToQImage(frame)
+                    );
+
+                    ui.labeloffsetx->setText(
+                        QString("Center Offset X : %1 px")
+                        .arg(movingCenter.x - targetCenter.x, 0, 'f', 1)
+                    );
+
+                    ui.labeloffsety->setText(
+                        QString("Center Offset Y : %1 px")
+                        .arg(movingCenter.y - targetCenter.y, 0, 'f', 1)
+                    );
+
+                    if (progress < 1.0)
+                    {
+                        ui.lblstatus->setText(
+                            QString("Status : Auto Centering %1%")
+                            .arg(static_cast<int>(progress * 100.0))
+                        );
+                    }
+                }
+            );
+
+            connect(
+                shiftAnimation,
+                &QVariantAnimation::finished,
+                this,
+                [
+                    this,
+                    finalDisplayImage,
+                    finalOffsetX,
+                    finalOffsetY,
+                    originalWidth,
+                    originalHeight,
+                    correctionAngle,
+                    methodName
+                ]()
+                {
+                    displayImage(ui.originalImageLabel, finalDisplayImage);
+
+                    ui.lblstatus->setText("Status : Completed");
+
+                    ui.labeloffsetx->setText(
+                        QString("Center Offset X : %1 px")
+                        .arg(finalOffsetX, 0, 'f', 2)
+                    );
+
+                    ui.labeloffsety->setText(
+                        QString("Center Offset Y : %1 px")
+                        .arg(finalOffsetY, 0, 'f', 2)
+                    );
+
+                    ui.lblImageStatus->setText(
+                        QString(
+                            "%1 Auto Center completed.\n"
+                            "Output dimensions: %2 x %3 px\n"
+                            "Rotation correction: %4 degrees\n"
+                            "Final offset X: %5 px\n"
+                            "Final offset Y: %6 px\n\n"
+                            "Not saved yet. Click Save Result to save."
+                        )
+                        .arg(methodName)
+                        .arg(originalWidth)
+                        .arg(originalHeight)
+                        .arg(correctionAngle, 0, 'f', 2)
+                        .arg(finalOffsetX, 0, 'f', 2)
+                        .arg(finalOffsetY, 0, 'f', 2)
+                    );
+
+                    if (shiftAnimation)
+                    {
+                        shiftAnimation->deleteLater();
+                        shiftAnimation = nullptr;
+                    }
+                }
+            );
+
+            shiftAnimation->start();
+        },
+        Qt::SingleShotConnection
     );
 
-    shiftAnimation->start();
+    // NOTE: never touch ui.* inside this lambda.
+    autoCenterWatcher->setFuture(
+        QtConcurrent::run(
+            [this, original, selectedMethod, diagnosticDirectory]()
+            -> CenteringResult
+            {
+                return processImageForCentering(
+                    original,
+                    selectedMethod,
+                    diagnosticDirectory
+                );
+            }
+        )
+    );
 }
 
 

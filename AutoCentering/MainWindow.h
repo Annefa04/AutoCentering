@@ -10,10 +10,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QElapsedTimer>
-#include <QProgressDialog>
 
 #include <atomic>
-#include <functional>
 
 #include <opencv2/opencv.hpp>
 
@@ -26,6 +24,26 @@
 class QComboBox;
 class QLabel;
 class QPushButton;
+
+
+// ============================================================
+// BATCH SUMMARY (returned by the worker thread)
+// Declared OUTSIDE the class so QFutureWatcher<BatchSummary>
+// can be used as a plain template argument.
+// ============================================================
+
+struct BatchSummary
+{
+    int total = 0;
+    int processed = 0;
+    int success = 0;
+    int failed = 0;
+    bool cancelled = false;
+    QString methodName;
+    QString outputDirectory;
+    QString errorMessage;
+};
+
 
 class AutoCentering : public QMainWindow
 {
@@ -54,6 +72,9 @@ private slots:
 
     void autoCenterImage();
 
+    // Saves the last Auto Center result (single image).
+    void saveResult();
+
 
     // ========================================================
     // BATCH PROCESSING
@@ -62,13 +83,6 @@ private slots:
     void browseBatchFolder();
 
     void startBatchAutoMode();
-
-
-    // ========================================================
-    // SAVE RESULT (single-image Auto Center)
-    // ========================================================
-
-    void saveResult();
 
 
 private:
@@ -124,30 +138,6 @@ private:
 
 
     // ========================================================
-    // BATCH SUMMARY (returned by the worker thread)
-    // ========================================================
-
-    struct BatchSummary
-    {
-        int total = 0;
-
-        int processed = 0;
-
-        int success = 0;
-
-        int failed = 0;
-
-        bool cancelled = false;
-
-        QString methodName;
-
-        QString outputDirectory;
-
-        QString errorMessage;
-    };
-
-
-    // ========================================================
     // BATCH AUTO MODE
     // ========================================================
 
@@ -171,7 +161,6 @@ private:
         const cv::Point2f& centerSmall,
         int durationMs
     );
-
 
     CenteringResult processImageForCentering(
         const cv::Mat& inputImage,
@@ -212,7 +201,6 @@ private:
 
     QString batchInputDirectory;
 
-    // Background batch watcher.
     QFutureWatcher<BatchSummary>* batchWatcher = nullptr;
 
     // Cancellation flag shared with the worker thread.
@@ -240,20 +228,6 @@ private:
 
 
     // ========================================================
-    // MANUAL AUTO CENTER (runs on a worker thread)
-    // ========================================================
-
-    QFutureWatcher<CenteringResult>* autoCenterWatcher = nullptr;
-
-    // Per-run data used by the watcher's finished handler.
-    cv::Mat autoCenterOriginal;
-
-    QString autoCenterBaseName;
-
-    QString autoCenterMethodName;
-
-
-    // ========================================================
     // DETECTION
     // ========================================================
 
@@ -262,6 +236,9 @@ private:
 
     QFutureWatcher<YOLOGuidedRefinementResult>* hybridWatcher =
         nullptr;
+
+    // Worker for the single-image Auto Center button.
+    QFutureWatcher<CenteringResult>* autoCenterWatcher = nullptr;
 
     bool isProcessing = false;
 
