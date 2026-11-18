@@ -1214,7 +1214,7 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
         // ----------------------------------------------------
         // 5. CLIP ROI TO IMAGE
         // ----------------------------------------------------
-
+       
         const cv::Rect imageBounds(
             0,
             0,
