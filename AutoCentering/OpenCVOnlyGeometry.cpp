@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -14,13 +15,21 @@ namespace
     // SAVE DIAGNOSTIC IMAGE
     // ============================================================
 
+    // Set to true only when you need intermediate diagnostic PNG files.
+    // Keeping this false avoids repeated disk writes during normal processing.
+    constexpr bool SAVE_DIAGNOSTIC_IMAGES = false;
+
     void saveDiagnostic(
         const std::string& directory,
         const std::string& filename,
         const cv::Mat& image)
     {
-        if (directory.empty() || image.empty())
+        if (!SAVE_DIAGNOSTIC_IMAGES ||
+            directory.empty() ||
+            image.empty())
+        {
             return;
+        }
 
         try
         {
@@ -30,12 +39,15 @@ namespace
                 path += '/';
 
             path += filename;
-
             cv::imwrite(path, image);
+        }
+        catch (const cv::Exception&)
+        {
+            // Diagnostic saving must not interrupt image processing.
         }
         catch (...)
         {
-            // Diagnostic saving must not interrupt processing.
+            // Ignore diagnostic I/O errors.
         }
     }
 
@@ -114,6 +126,7 @@ namespace
 
         const double width = rotatedBox.size.width;
         const double height = rotatedBox.size.height;
+
 
         if (width < 5.0 || height < 5.0)
             return false;
@@ -197,7 +210,7 @@ namespace
 
         totalContours = 0;
 
-        const int kernelSizes[] = { 3, 5, 7 };
+        const int kernelSizes[] = { 3, 5 };
 
         for (const cv::Mat& sourceMask : thresholdMasks)
         {
@@ -337,7 +350,7 @@ namespace
         if (referenceDiagonal <= 0.0)
             return false;
 
-        const int kernelSizes[] = { 3, 5, 7 };
+        const int kernelSizes[] = { 3, 5 };
 
         for (const cv::Mat& sourceMask : masks)
         {
@@ -644,10 +657,10 @@ namespace
 // OPENCV-ONLY COMPONENT SEGMENTATION
 // ============================================================
 
-OpenCVOnlySegmentationResult
-OpenCVOnlyGeometry::segmentFullImage(
+static OpenCVOnlySegmentationResult segmentFullImageInternal(
     const cv::Mat& bgrImage,
-    const std::string& outputDirectory)
+    const std::string& outputDirectory,
+    bool performOpenCVOnlyContourSelection)
 {
     OpenCVOnlySegmentationResult result;
 
@@ -862,16 +875,28 @@ OpenCVOnlyGeometry::segmentFullImage(
             result.adaptiveInverseC2Mask
         };
 
-        result.outerContourFound =
-            findMainComponentContour(
-                masks,
-                result.grayImage.size(),
-                result.outerCableContour,
-                result.outerCableMask,
-                result.outerBoundingBox,
-                result.outerRotatedBoundingBox,
-                result.contourCount
-            );
+        // OpenCV-only needs its own contour selection.
+        // Hybrid skips this step because it performs YOLO-guided
+        // contour selection later using the same threshold masks.
+        if (performOpenCVOnlyContourSelection)
+        {
+            result.outerContourFound =
+                findMainComponentContour(
+                    masks,
+                    result.grayImage.size(),
+                    result.outerCableContour,
+                    result.outerCableMask,
+                    result.outerBoundingBox,
+                    result.outerRotatedBoundingBox,
+                    result.contourCount
+                );
+        }
+        else
+        {
+            result.outerContourFound = false;
+            result.contourCount = 0;
+            result.message = "Threshold masks generated for YOLO-guided refinement.";
+        }
 
         // ----------------------------------------------------
         // 9. VISUALIZATION
@@ -1073,6 +1098,19 @@ OpenCVOnlyGeometry::segmentFullImage(
     }
 }
 
+// Public OpenCV-only entry point. Keeps the existing header/API unchanged.
+OpenCVOnlySegmentationResult
+OpenCVOnlyGeometry::segmentFullImage(
+    const cv::Mat& bgrImage,
+    const std::string& outputDirectory)
+{
+    return segmentFullImageInternal(
+        bgrImage,
+        outputDirectory,
+        true
+    );
+}
+
 // ============================================================
 // YOLO + GEOMETRIC REFINEMENT
 // ============================================================
@@ -1214,7 +1252,7 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
         // ----------------------------------------------------
         // 5. CLIP ROI TO IMAGE
         // ----------------------------------------------------
-       
+
         const cv::Rect imageBounds(
             0,
             0,
@@ -1249,9 +1287,10 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
         // ----------------------------------------------------
 
         result.segmentation =
-            segmentFullImage(
+            segmentFullImageInternal(
                 roiImage,
-                outputDirectory
+                outputDirectory,
+                false
             );
 
         if (!result.segmentation.success)
@@ -1631,7 +1670,7 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
                     << totalContours << '\n';
             }
         }
-
+       
         // ----------------------------------------------------
         // 18. FINISH
         // ----------------------------------------------------
