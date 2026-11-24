@@ -91,7 +91,7 @@ namespace
     // true  = do NOT run a detection on the rotated image; transform the
     //         first detection's centre instead (saves one full detection).
     constexpr bool kReuseRotatedDetection = true;
-
+    
     // true  = run a final detection on the corrected image to MEASURE the
     //         residual offset (accurate, costs one full detection).
     //         Keep true when collecting results for the report.
@@ -220,7 +220,7 @@ namespace
         box.points(corners);
 
         double longestLength = 0.0;
-        double longestAngle = 0.0;
+        double longestAngle = 0.0;  
 
         for (int i = 0; i < 4; ++i)
         {
