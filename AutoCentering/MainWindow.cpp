@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -52,11 +53,66 @@ namespace
 {
     // Batch animation length per image (ms).
     // Set to 0 to skip the animation completely (fastest batch).
-    constexpr int kBatchAnimationMs = 600;
+    // ---- BATCH: STEP-BY-STEP DISPLAY (per image) ----
+    //   Step 1/3 : the image is loaded and shown
+    //   Step 2/3 : the component is detected (box + centre are shown)
+    //   Step 3/3 : the image rotates / shifts to the centre
+    // Set kBatchAnimationMs to 0 to skip ALL steps (fastest batch).
+    constexpr int kBatchStepImageMs = 400;  // Step 1: pause on the loaded image
+    constexpr int kBatchStepDetectMs = 1500;  // Step 2: pause on the detection
+    constexpr int kBatchAnimationMs = 1000;  // Step 3: centering movement
+    constexpr int kBatchStepFinalMs = 1500;  // pause on the result, then next image
+
+    // true  = write "1/3 IMAGE LOADED", "2/3 COMPONENT DETECTED",
+    //         "3/3 AUTO CENTERING" on the image
+    // false = no text on the image (the status label still shows the step)
+    constexpr bool kBatchShowCaptions = false; 
+
+    // Called by processImageForCentering() right after the FIRST detection,
+    // so the bounding box can be shown immediately (batch step-by-step mode)
+    // while the rest of the centering is still being calculated.
+    // thread_local: only the batch worker thread that set it will call it.
+    thread_local std::function<void(const cv::RotatedRect&,
+        const cv::Point2f&)>
+        tlsInitialDetectionCallback;
+
+    // How long playBatchAnimation() pauses on the detection frame before the
+    // centering movement starts. The batch worker sets this to 0 when the
+    // bounding box was already shown (and held) right after the detection.
+    std::atomic<int> gBatchDetectHoldMs{ kBatchStepDetectMs };
+
+    // Single-image Auto Center animation length (ms).
+    constexpr int kAutoCenterAnimationMs = 1200;
 
     // Diagnostic images (many large PNG writes) are VERY slow.
     // Keep this false for normal use. Set true only to debug.
     constexpr bool kSaveDiagnostics = false;
+
+    // true  = do NOT run a detection on the rotated image; transform the
+    //         first detection's centre instead (saves one full detection).
+    constexpr bool kReuseRotatedDetection = true;
+
+    // true  = run a final detection on the corrected image to MEASURE the
+    //         residual offset (accurate, costs one full detection).
+    //         Keep true when collecting results for the report.
+    // false = skip it (fastest). The residual offset is then the
+    //         PREDICTED value (about 0), not a measurement.
+    constexpr bool kVerifyFinalDetection = true;
+
+    // Apply a 2x3 affine matrix (CV_64F) to a point.
+    cv::Point2f applyAffine(const cv::Mat& m, const cv::Point2f& p)
+    {
+        return cv::Point2f(
+            static_cast<float>(
+                m.at<double>(0, 0) * p.x +
+                m.at<double>(0, 1) * p.y +
+                m.at<double>(0, 2)),
+            static_cast<float>(
+                m.at<double>(1, 0) * p.x +
+                m.at<double>(1, 1) * p.y +
+                m.at<double>(1, 2))
+        );
+    }
 
     // Convert QImage to an independent OpenCV BGR image.
     cv::Mat qImageToBGR(const QImage& image)
@@ -420,8 +476,7 @@ AutoCentering::AutoCentering(QWidget* parent)
                     "Component centre: (%5, %6)\n"
                     "Offset X: %7 px\n"
                     "Offset Y: %8 px\n"
-                    "Saved: output/open_cv_diagnostics/"
-                    "opencv_main_component_result.png"
+                    "Processing time: %9 ms"
                 )
                 .arg(result.outerCableContour.size())
                 .arg(box.size.width, 0, 'f', 1)
@@ -431,6 +486,7 @@ AutoCentering::AutoCentering(QWidget* parent)
                 .arg(box.center.y, 0, 'f', 1)
                 .arg(offsetX, 0, 'f', 1)
                 .arg(offsetY, 0, 'f', 1)
+                .arg(result.processingTimeMs, 0, 'f', 0)
             );
         }
     );
@@ -549,8 +605,7 @@ AutoCentering::AutoCentering(QWidget* parent)
                     "Centre Offset:\n"
                     "X: %11 px\n"
                     "Y: %12 px\n\n"
-                    "Saved: output/yolo_geometric_diagnostics/"
-                    "yolo_geometric_refinement_result.png"
+                    "Refinement time: %13 ms"
                 )
                 .arg(result.roi.x)
                 .arg(result.roi.y)
@@ -564,6 +619,7 @@ AutoCentering::AutoCentering(QWidget* parent)
                 .arg(refinedBox.center.y, 0, 'f', 1)
                 .arg(offsetX, 0, 'f', 1)
                 .arg(offsetY, 0, 'f', 1)
+                .arg(result.processingTimeMs, 0, 'f', 0)
             );
         }
     );
@@ -646,7 +702,6 @@ AutoCentering::~AutoCentering()
     delete detector;
     detector = nullptr;
 }
-
 
 // ============================================================
 // LOAD IMAGE
@@ -913,19 +968,26 @@ void AutoCentering::processOpenCVOnly()
         return;
     }
 
-    const QString outputFolder =
-        QDir::currentPath() +
-        "/output/open_cv_diagnostics";
+    // The output folder is only created / used when diagnostics
+    // are switched on (kSaveDiagnostics = true).
+    QString outputFolder;
 
-    if (!QDir().mkpath(outputFolder))
+    if (kSaveDiagnostics)
     {
-        QMessageBox::warning(
-            this,
-            "Output Error",
-            "Could not create the diagnostic folder."
-        );
+        outputFolder =
+            QDir::currentPath() +
+            "/output/open_cv_diagnostics";
 
-        return;
+        if (!QDir().mkpath(outputFolder))
+        {
+            QMessageBox::warning(
+                this,
+                "Output Error",
+                "Could not create the diagnostic folder."
+            );
+
+            return;
+        }
     }
 
     setProcessingState(true);
@@ -948,13 +1010,28 @@ void AutoCentering::processOpenCVOnly()
             {
                 try
                 {
+                    SegmentationOptions options;
+
+                    // The on-screen overlay needs the visualization image.
+                    options.buildVisualizations = true;
+
+                    // Disk output only when kSaveDiagnostics = true.
+                    options.saveDiagnostics = kSaveDiagnostics;
+                    options.outputDirectory = outputFolderStd;
+
+                    // Speed options (test accuracy after each one):
+                    // options.maxImageSide = 1280;
+                    // options.kernelSizes  = { 3, 5 };
+                    // options.needAllMasks = false;
+
                     OpenCVOnlySegmentationResult result =
                         OpenCVOnlyGeometry::segmentFullImage(
                             bgr,
-                            outputFolderStd
+                            options
                         );
 
-                    if (result.success &&
+                    if (kSaveDiagnostics &&
+                        result.success &&
                         result.outerContourFound &&
                         !result.candidateVisualization.empty())
                     {
@@ -1038,19 +1115,26 @@ void AutoCentering::processYOLOGeometricRefinement()
         return;
     }
 
-    const QString outputFolder =
-        QDir::currentPath() +
-        "/output/yolo_geometric_diagnostics";
+    // The output folder is only created / used when diagnostics
+    // are switched on (kSaveDiagnostics = true).
+    QString outputFolder;
 
-    if (!QDir().mkpath(outputFolder))
+    if (kSaveDiagnostics)
     {
-        QMessageBox::warning(
-            this,
-            "Output Error",
-            "Could not create the hybrid diagnostic folder."
-        );
+        outputFolder =
+            QDir::currentPath() +
+            "/output/yolo_geometric_diagnostics";
 
-        return;
+        if (!QDir().mkpath(outputFolder))
+        {
+            QMessageBox::warning(
+                this,
+                "Output Error",
+                "Could not create the hybrid diagnostic folder."
+            );
+
+            return;
+        }
     }
 
     setProcessingState(true);
@@ -1110,18 +1194,37 @@ void AutoCentering::processYOLOGeometricRefinement()
                     QElapsedTimer refinementTimer;
                     refinementTimer.start();
 
+                    RefinementOptions options;
+
+                    options.paddingRatio = 0.25f;
+
+                    // The on-screen overlay needs the visualization image.
+                    options.buildVisualizations = true;
+
+                    // Disk output only when kSaveDiagnostics = true.
+                    options.saveDiagnostics = kSaveDiagnostics;
+                    options.outputDirectory = outputFolderStd;
+
+                    // Speed options (test accuracy after each one):
+                    // options.paddingRatio = 0.15f;
+                    // options.maxRoiSide   = 640;
+                    // options.kernelSizes  = { 3, 5 };
+                    // options.needAllMasks = false;
+
                     YOLOGuidedRefinementResult result =
                         OpenCVOnlyGeometry::refineWithinYOLORegion(
                             bgr,
                             yoloBox,
-                            outputFolderStd,
-                            0.25f
+                            options
                         );
 
                     qDebug() << "[PERFORMANCE] OpenCV Refinement:"
-                        << refinementTimer.elapsed() << "ms";
+                        << refinementTimer.elapsed() << "ms"
+                        << "(inside function:"
+                        << result.processingTimeMs << "ms)";
 
-                    if (result.success &&
+                    if (kSaveDiagnostics &&
+                        result.success &&
                         result.refinedContourFound &&
                         !result.fullImageVisualization.empty())
                     {
@@ -1159,7 +1262,7 @@ void AutoCentering::processYOLOGeometricRefinement()
 
 void AutoCentering::autoCenterImage()
 {
-    // Heavy work (3 detections + 2 warps) runs on a worker thread.
+    // Heavy work runs on a worker thread.
     // The UI thread only starts the job and, when it is finished,
     // shows the result and plays the animation.
 
@@ -1456,7 +1559,7 @@ void AutoCentering::autoCenterImage()
 
             shiftAnimation = new QVariantAnimation(this);
 
-            shiftAnimation->setDuration(3000);
+            shiftAnimation->setDuration(kAutoCenterAnimationMs);
             shiftAnimation->setStartValue(0.0);
             shiftAnimation->setEndValue(1.0);
             shiftAnimation->setEasingCurve(QEasingCurve::InOutSine);
@@ -2211,6 +2314,11 @@ void AutoCentering::processBatchImages(
                     CenteringResult result;
                     cv::Mat inputImage;
 
+                    // Set when the bounding box was already shown
+                    // right after the first detection.
+                    QElapsedTimer detectShownTimer;
+                    bool detectionShown = false;
+
                     try
                     {
                         inputImage = cv::imread(
@@ -2244,11 +2352,267 @@ void AutoCentering::processBatchImages(
                         }
                         else
                         {
+                            // ---- STEP 1/3: IMAGE LOADED ----
+                            if (kBatchAnimationMs > 0)
+                            {
+                                cv::Mat step1;
+
+                                const int longestSide =
+                                    std::max(inputImage.cols, inputImage.rows);
+
+                                const double step1Scale =
+                                    longestSide > 1200
+                                    ? 1200.0 / longestSide
+                                    : 1.0;
+
+                                if (step1Scale < 1.0)
+                                {
+                                    cv::resize(
+                                        inputImage,
+                                        step1,
+                                        cv::Size(),
+                                        step1Scale,
+                                        step1Scale,
+                                        cv::INTER_AREA
+                                    );
+                                }
+                                else
+                                {
+                                    step1 = inputImage.clone();
+                                }
+
+                                cv::putText(
+                                    step1,
+                                    kBatchShowCaptions ? "1/3  IMAGE LOADED" : "",
+                                    cv::Point(20, 40),
+                                    cv::FONT_HERSHEY_SIMPLEX,
+                                    std::max(0.6, step1.cols / 1400.0),
+                                    cv::Scalar(0, 200, 255),
+                                    2,
+                                    cv::LINE_AA
+                                );
+
+                                const QImage step1Image =
+                                    bgrToQImage(step1);
+
+                                QMetaObject::invokeMethod(
+                                    this,
+                                    [this, step1Image]()
+                                    {
+                                        displayImage(
+                                            ui.originalImageLabel,
+                                            step1Image
+                                        );
+
+                                        ui.lblstatus->setText(
+                                            "Status : Step 1/3 - Image Loaded"
+                                        );
+
+                                        ui.labeloffsetx->setText(
+                                            "Center Offset X : --"
+                                        );
+
+                                        ui.labeloffsety->setText(
+                                            "Center Offset Y : --"
+                                        );
+
+                                        ui.labelconfidence->setText(
+                                            "Confidence : --"
+                                        );
+                                    },
+                                    Qt::QueuedConnection
+                                );
+
+                                // Let the user see the loaded image.
+                                QElapsedTimer imageHold;
+                                imageHold.start();
+
+                                while (imageHold.elapsed() < kBatchStepImageMs &&
+                                    !batchCancelRequested.load())
+                                {
+                                    QThread::msleep(15);
+                                }
+
+                                // The display pause above is NOT processing
+                                // time: restart the timer so processing_time_ms
+                                // in the CSV only measures the real work.
+                                timer.restart();
+
+                                // ---- STEP 2/3: DETECTING ----
+                                QMetaObject::invokeMethod(
+                                    this,
+                                    [this]()
+                                    {
+                                        ui.lblstatus->setText(
+                                            "Status : Step 2/3 - Detecting component..."
+                                        );
+                                    },
+                                    Qt::QueuedConnection
+                                );
+
+                                // ---- SHOW THE BOUNDING BOX AS SOON AS THE
+                                // ---- FIRST DETECTION IS FINISHED
+                                const cv::Mat originalForBox = inputImage;
+
+                                const int boxLongest =
+                                    std::max(inputImage.cols, inputImage.rows);
+
+                                const double boxScale =
+                                    boxLongest > 1200
+                                    ? 1200.0 / boxLongest
+                                    : 1.0;
+
+                                tlsInitialDetectionCallback =
+                                    [this,
+                                    &detectShownTimer,
+                                    &detectionShown,
+                                    originalForBox,
+                                    boxScale](
+                                        const cv::RotatedRect& box,
+                                        const cv::Point2f& centre)
+                                    {
+                                        cv::Mat frame;
+
+                                        if (boxScale < 1.0)
+                                        {
+                                            cv::resize(
+                                                originalForBox,
+                                                frame,
+                                                cv::Size(),
+                                                boxScale,
+                                                boxScale,
+                                                cv::INTER_AREA
+                                            );
+                                        }
+                                        else
+                                        {
+                                            frame = originalForBox.clone();
+                                        }
+
+                                        const cv::RotatedRect boxScaled(
+                                            cv::Point2f(
+                                                static_cast<float>(box.center.x * boxScale),
+                                                static_cast<float>(box.center.y * boxScale)),
+                                            cv::Size2f(
+                                                static_cast<float>(box.size.width * boxScale),
+                                                static_cast<float>(box.size.height * boxScale)),
+                                            box.angle
+                                        );
+
+                                        const cv::Point2f centreScaled(
+                                            static_cast<float>(centre.x * boxScale),
+                                            static_cast<float>(centre.y * boxScale)
+                                        );
+
+                                        const cv::Point2f targetScaled(
+                                            frame.cols / 2.0f,
+                                            frame.rows / 2.0f
+                                        );
+
+                                        // Green box = detected component.
+                                        drawRotatedBox(
+                                            frame,
+                                            boxScaled,
+                                            cv::Scalar(0, 255, 0),
+                                            2
+                                        );
+
+                                        // Yellow line = distance to the target.
+                                        cv::line(
+                                            frame,
+                                            centreScaled,
+                                            targetScaled,
+                                            cv::Scalar(0, 220, 255),
+                                            2,
+                                            cv::LINE_AA
+                                        );
+
+                                        // Red dot = component centre.
+                                        cv::circle(
+                                            frame,
+                                            centreScaled,
+                                            5,
+                                            cv::Scalar(0, 0, 255),
+                                            cv::FILLED,
+                                            cv::LINE_AA
+                                        );
+
+                                        // Blue cross = target (image centre).
+                                        cv::drawMarker(
+                                            frame,
+                                            cv::Point(
+                                                cvRound(targetScaled.x),
+                                                cvRound(targetScaled.y)),
+                                            cv::Scalar(255, 0, 0),
+                                            cv::MARKER_CROSS,
+                                            20,
+                                            2,
+                                            cv::LINE_AA
+                                        );
+
+                                        cv::putText(
+                                            frame,
+                                            kBatchShowCaptions
+                                            ? "2/3  COMPONENT DETECTED"
+                                            : "",
+                                            cv::Point(20, 40),
+                                            cv::FONT_HERSHEY_SIMPLEX,
+                                            std::max(0.6, frame.cols / 1400.0),
+                                            cv::Scalar(0, 200, 255),
+                                            2,
+                                            cv::LINE_AA
+                                        );
+
+                                        const QImage boxImage =
+                                            bgrToQImage(frame);
+
+                                        const double offsetX =
+                                            centre.x - originalForBox.cols / 2.0;
+
+                                        const double offsetY =
+                                            centre.y - originalForBox.rows / 2.0;
+
+                                        QMetaObject::invokeMethod(
+                                            this,
+                                            [this, boxImage, offsetX, offsetY]()
+                                            {
+                                                displayImage(
+                                                    ui.originalImageLabel,
+                                                    boxImage
+                                                );
+
+                                                ui.lblstatus->setText(
+                                                    "Status : Step 2/3 - Component Detected "
+                                                    "(calculating centering...)"
+                                                );
+
+                                                ui.labeloffsetx->setText(
+                                                    QString("Center Offset X : %1 px")
+                                                    .arg(offsetX, 0, 'f', 1)
+                                                );
+
+                                                ui.labeloffsety->setText(
+                                                    QString("Center Offset Y : %1 px")
+                                                    .arg(offsetY, 0, 'f', 1)
+                                                );
+                                            },
+                                            Qt::QueuedConnection
+                                        );
+
+                                        detectionShown = true;
+                                        detectShownTimer.start();
+                                    };
+                            }
+
                             result = processImageForCentering(
                                 inputImage,
                                 selectedMethod,
                                 imageDiagnosticDirectory
                             );
+
+                            // The callback refers to local variables, so it
+                            // must never outlive this image.
+                            tlsInitialDetectionCallback = nullptr;
 
                             if (!result.success)
                             {
@@ -2267,7 +2631,7 @@ void AutoCentering::processBatchImages(
                                     QDir(previewDirectory).filePath(
                                         uniqueName + "_preview.png");
 
-                                // Fast PNG writes (no compression).
+                                // Fast PNG writes (low compression).
                                 const std::vector<int> fastPng = {
                                     cv::IMWRITE_PNG_COMPRESSION, 1 };
 
@@ -2368,6 +2732,26 @@ void AutoCentering::processBatchImages(
                                 static_cast<float>(result.initialCenter.y * k)
                             );
 
+                            // The bounding box was already shown right after
+                            // the detection. Make sure it stays visible for
+                            // at least kBatchStepDetectMs, then start the
+                            // movement without another pause.
+                            if (detectionShown)
+                            {
+                                while (detectShownTimer.elapsed() <
+                                    kBatchStepDetectMs &&
+                                    !batchCancelRequested.load())
+                                {
+                                    QThread::msleep(15);
+                                }
+
+                                gBatchDetectHoldMs = 0;
+                            }
+                            else
+                            {
+                                gBatchDetectHoldMs = kBatchStepDetectMs;
+                            }
+
                             batchAnimating = true;
 
                             QMetaObject::invokeMethod(
@@ -2393,7 +2777,8 @@ void AutoCentering::processBatchImages(
 
                             while (batchAnimating.load() &&
                                 !batchCancelRequested.load() &&
-                                waitTimer.elapsed() < kBatchAnimationMs + 3000)
+                                waitTimer.elapsed() <
+                                kBatchStepDetectMs + kBatchAnimationMs + 3000)
                             {
                                 QThread::msleep(15);
                             }
@@ -2436,6 +2821,19 @@ void AutoCentering::processBatchImages(
                             },
                             Qt::QueuedConnection
                         );
+
+                        // Let the user see the final centered result.
+                        if (kBatchAnimationMs > 0)
+                        {
+                            QElapsedTimer finalHold;
+                            finalHold.start();
+
+                            while (finalHold.elapsed() < kBatchStepFinalMs &&
+                                !batchCancelRequested.load())
+                            {
+                                QThread::msleep(15);
+                            }
+                        }
                     }
                     else
                     {
@@ -2571,8 +2969,13 @@ QString AutoCentering::getMethodSuffix(DetectionMethod method) const
 
 
 // ============================================================
-// BATCH AUTO MODE - PROCESS ONE IMAGE
+// BATCH AUTO MODE - PROCESS ONE IMAGE  (FAST VERSION)
 // (runs on the worker thread: never touches ui.*)
+//
+// Detection passes per image:
+//   old code : 3  (initial + after rotation + final)
+//   now      : 2  (initial + final)   [kReuseRotatedDetection = true]
+//            : 1                      [+ kVerifyFinalDetection = false]
 // ============================================================
 
 AutoCentering::CenteringResult
@@ -2593,7 +2996,8 @@ AutoCentering::processImageForCentering(
             return output;
         }
 
-        cv::Mat original = inputImage.clone();
+        // Read-only use, so no clone is needed.
+        const cv::Mat original = inputImage;
 
         const int originalWidth = original.cols;
         const int originalHeight = original.rows;
@@ -2603,11 +3007,8 @@ AutoCentering::processImageForCentering(
             originalHeight / 2.0f
         );
 
-        // 2. DIAGNOSTIC DIRECTORIES
-        // Empty paths are passed on when diagnostics are off, so the
-        // detection functions write nothing to disk (much faster).
+        // 2. DIAGNOSTIC DIRECTORIES (empty = nothing is written)
         QString initialDiagnostic;
-        QString rotatedDiagnostic;
         QString finalDiagnostic;
 
         if (kSaveDiagnostics && !diagnosticDirectory.isEmpty())
@@ -2615,14 +3016,10 @@ AutoCentering::processImageForCentering(
             initialDiagnostic =
                 QDir(diagnosticDirectory).filePath("initial");
 
-            rotatedDiagnostic =
-                QDir(diagnosticDirectory).filePath("rotated");
-
             finalDiagnostic =
                 QDir(diagnosticDirectory).filePath("final");
 
             if (!QDir().mkpath(initialDiagnostic) ||
-                !QDir().mkpath(rotatedDiagnostic) ||
                 !QDir().mkpath(finalDiagnostic))
             {
                 output.errorMessage =
@@ -2642,7 +3039,7 @@ AutoCentering::processImageForCentering(
             QString message;
         };
 
-        // 4. COMMON DETECTION FUNCTION
+        // 4. COMMON DETECTION FUNCTION (uses the fast option overloads)
         auto detectObject =
             [this, selectedMethod](
                 const cv::Mat& image,
@@ -2700,10 +3097,22 @@ AutoCentering::processImageForCentering(
                 if (selectedMethod ==
                     DetectionMethod::GeometricRefinement)
                 {
+                    SegmentationOptions opt;   // fast defaults
+
+                    // Auto Center does not need overlay images.
+                    opt.buildVisualizations = false;
+                    opt.saveDiagnostics = !diagnostic.empty();
+                    opt.outputDirectory = diagnostic;
+
+                    // Speed options (test accuracy after each one):
+                    // opt.maxImageSide = 1280;
+                    // opt.kernelSizes  = { 3, 5 };
+                    // opt.needAllMasks = false;
+
                     OpenCVOnlySegmentationResult result =
                         OpenCVOnlyGeometry::segmentFullImage(
                             image,
-                            diagnostic
+                            opt
                         );
 
                     if (!result.success || !result.outerContourFound)
@@ -2762,12 +3171,23 @@ AutoCentering::processImageForCentering(
                         angleDegrees
                     );
 
+                    RefinementOptions opt;     // fast defaults
+                    opt.paddingRatio = 0.25f;
+                    opt.buildVisualizations = false;
+                    opt.saveDiagnostics = !diagnostic.empty();
+                    opt.outputDirectory = diagnostic;
+
+                    // Speed options (test accuracy after each one):
+                    // opt.paddingRatio = 0.15f;
+                    // opt.maxRoiSide   = 640;
+                    // opt.kernelSizes  = { 3, 5 };
+                    // opt.needAllMasks = false;
+
                     YOLOGuidedRefinementResult result =
                         OpenCVOnlyGeometry::refineWithinYOLORegion(
                             image,
                             yoloBox,
-                            diagnostic,
-                            0.25f
+                            opt
                         );
 
                     if (!result.success || !result.refinedContourFound)
@@ -2800,7 +3220,7 @@ AutoCentering::processImageForCentering(
                 return info;
             };
 
-        // 5. INITIAL DETECTION
+        // 5. INITIAL DETECTION (the only mandatory detection)
         const DetectionInfo initialDetection =
             detectObject(original, initialDiagnostic);
 
@@ -2813,6 +3233,16 @@ AutoCentering::processImageForCentering(
             return output;
         }
 
+        // Batch step-by-step mode: show the bounding box NOW, before the
+        // rotation / final check are calculated.
+        if (tlsInitialDetectionCallback)
+        {
+            tlsInitialDetectionCallback(
+                initialDetection.box,
+                initialDetection.center
+            );
+        }
+
         output.confidence = initialDetection.confidence;
 
         // 6. ROTATION CORRECTION
@@ -2823,7 +3253,7 @@ AutoCentering::processImageForCentering(
         output.initialBox = initialDetection.box;
         output.initialCenter = initialDetection.center;
 
-        // 7. ROTATE IMAGE WITHOUT CROPPING
+        // 7. ROTATION MATRIX (no cropping)
         const cv::Point2f originalCenter(
             original.cols / 2.0f,
             original.rows / 2.0f
@@ -2860,13 +3290,15 @@ AutoCentering::processImageForCentering(
         rotationMatrix.at<double>(1, 2) +=
             rotatedHeight / 2.0 - originalCenter.y;
 
-        // 8. DETECT AFTER ROTATION
-        DetectionInfo rotatedDetection;
+        // 8. CENTRE AFTER ROTATION
+        // Option A (fast): transform the first centre with the rotation.
+        // Option B (old behaviour): warp the image and detect again.
+        cv::Point2f rotatedCenter;
 
-        if (correctionAngle == 0.0)
+        if (kReuseRotatedDetection || correctionAngle == 0.0)
         {
-            // No rotation: reuse the first detection.
-            rotatedDetection = initialDetection;
+            rotatedCenter =
+                applyAffine(rotationMatrix, initialDetection.center);
         }
         else
         {
@@ -2882,25 +3314,27 @@ AutoCentering::processImageForCentering(
                 cv::Scalar(255, 255, 255)
             );
 
-            rotatedDetection =
-                detectObject(rotated, rotatedDiagnostic);
-        }
+            const DetectionInfo rotatedDetection =
+                detectObject(rotated, QString());
 
-        if (!rotatedDetection.found)
-        {
-            output.errorMessage =
-                "Detection after rotation failed: " +
-                rotatedDetection.message;
+            if (!rotatedDetection.found)
+            {
+                output.errorMessage =
+                    "Detection after rotation failed: " +
+                    rotatedDetection.message;
 
-            return output;
+                return output;
+            }
+
+            rotatedCenter = rotatedDetection.center;
         }
 
         // 9. TRANSLATION
         const double shiftX =
-            outputCenter.x - rotatedDetection.center.x;
+            outputCenter.x - rotatedCenter.x;
 
         const double shiftY =
-            outputCenter.y - rotatedDetection.center.y;
+            outputCenter.y - rotatedCenter.y;
 
         output.translationX = shiftX;
         output.translationY = shiftY;
@@ -2919,22 +3353,42 @@ AutoCentering::processImageForCentering(
             corrected,
             finalTransform,
             cv::Size(originalWidth, originalHeight),
-            cv::INTER_CUBIC,
+            cv::INTER_CUBIC,      // INTER_LINEAR is faster, slightly softer
             cv::BORDER_CONSTANT,
             cv::Scalar(255, 255, 255)
         );
 
-        // 12. FINAL DETECTION
-        const DetectionInfo finalDetection =
-            detectObject(corrected, finalDiagnostic);
+        // 12. FINAL DETECTION (measured) OR PREDICTION (fast)
+        DetectionInfo finalDetection;
 
-        if (!finalDetection.found)
+        if (kVerifyFinalDetection)
         {
-            output.errorMessage =
-                "Final detection failed: " +
-                finalDetection.message;
+            finalDetection =
+                detectObject(corrected, finalDiagnostic);
 
-            return output;
+            if (!finalDetection.found)
+            {
+                output.errorMessage =
+                    "Final detection failed: " +
+                    finalDetection.message;
+
+                return output;
+            }
+        }
+        else
+        {
+            // Predicted result: the box corners moved by finalTransform.
+            cv::Point2f corners[4];
+            initialDetection.box.points(corners);
+
+            std::vector<cv::Point2f> moved;
+
+            for (int i = 0; i < 4; ++i)
+                moved.push_back(applyAffine(finalTransform, corners[i]));
+
+            finalDetection.found = true;
+            finalDetection.box = cv::minAreaRect(moved);
+            finalDetection.center = outputCenter;   // by construction
         }
 
         // 13. FINAL RESIDUAL OFFSET
@@ -3077,17 +3531,11 @@ void AutoCentering::playBatchAnimation(
         frameHeight / 2.0f
     );
 
-    auto* animation = new QVariantAnimation(this);
-
-    animation->setDuration(durationMs);
-    animation->setStartValue(0.0);
-    animation->setEndValue(1.0);
-    animation->setEasingCurve(QEasingCurve::InOutSine);
-
-    connect(
-        animation,
-        &QVariantAnimation::valueChanged,
-        this,
+    // --------------------------------------------------------
+    // Draws ONE frame. progress 0 = original image (as detected),
+    // progress 1 = fully centered.
+    // --------------------------------------------------------
+    auto renderFrame =
         [this,
         originalSmall,
         transformSmall,
@@ -3095,10 +3543,8 @@ void AutoCentering::playBatchAnimation(
         centerSmall,
         frameWidth,
         frameHeight,
-        targetCenter](const QVariant& value)
+        targetCenter](double progress, const char* caption)
         {
-            const double progress = value.toDouble();
-
             // Interpolate identity -> final affine transform.
             cv::Mat currentTransform = cv::Mat::eye(2, 3, CV_64F);
 
@@ -3167,6 +3613,16 @@ void AutoCentering::playBatchAnimation(
             // Moving component centre.
             const cv::Point2f movingCenter = apply(centerSmall);
 
+            // Yellow line: remaining distance to the target.
+            cv::line(
+                frame,
+                movingCenter,
+                targetCenter,
+                cv::Scalar(0, 220, 255),
+                2,
+                cv::LINE_AA
+            );
+
             cv::circle(
                 frame,
                 movingCenter,
@@ -3189,6 +3645,18 @@ void AutoCentering::playBatchAnimation(
                 cv::LINE_AA
             );
 
+            // Step caption.
+            cv::putText(
+                frame,
+                kBatchShowCaptions ? caption : "",
+                cv::Point(20, 40),
+                cv::FONT_HERSHEY_SIMPLEX,
+                std::max(0.6, frameWidth / 1400.0),
+                cv::Scalar(0, 200, 255),
+                2,
+                cv::LINE_AA
+            );
+
             displayImage(
                 ui.originalImageLabel,
                 bgrToQImage(frame)
@@ -3203,26 +3671,75 @@ void AutoCentering::playBatchAnimation(
                 QString("Center Offset Y : %1 px")
                 .arg(movingCenter.y - targetCenter.y, 0, 'f', 1)
             );
+        };
+
+    // --------------------------------------------------------
+    // STEP 2/3: SHOW THE DETECTION (box + centre + target)
+    // --------------------------------------------------------
+
+    renderFrame(0.0, "2/3  COMPONENT DETECTED");
+
+    ui.lblstatus->setText(
+        "Status : Step 2/3 - Component Detected"
+    );
+
+    // --------------------------------------------------------
+    // STEP 3/3: AUTO CENTERING (after a short pause)
+    // --------------------------------------------------------
+
+    QTimer::singleShot(
+        gBatchDetectHoldMs.load(),
+        this,
+        [this, renderFrame, durationMs]()
+        {
+            if (batchCancelRequested.load())
+            {
+                batchAnimating = false;
+                return;
+            }
 
             ui.lblstatus->setText(
-                QString("Status : Auto Centering %1%")
-                .arg(static_cast<int>(progress * 100.0))
+                "Status : Step 3/3 - Auto Centering 0%"
             );
+
+            auto* animation = new QVariantAnimation(this);
+
+            animation->setDuration(durationMs);
+            animation->setStartValue(0.0);
+            animation->setEndValue(1.0);
+            animation->setEasingCurve(QEasingCurve::InOutSine);
+
+            connect(
+                animation,
+                &QVariantAnimation::valueChanged,
+                this,
+                [this, renderFrame](const QVariant& value)
+                {
+                    const double progress = value.toDouble();
+
+                    renderFrame(progress, "3/3  AUTO CENTERING");
+
+                    ui.lblstatus->setText(
+                        QString("Status : Step 3/3 - Auto Centering %1%")
+                        .arg(static_cast<int>(progress * 100.0))
+                    );
+                }
+            );
+
+            connect(
+                animation,
+                &QVariantAnimation::finished,
+                this,
+                [this, animation]()
+                {
+                    batchAnimating = false;
+                    animation->deleteLater();
+                }
+            );
+
+            animation->start();
         }
     );
-
-    connect(
-        animation,
-        &QVariantAnimation::finished,
-        this,
-        [this, animation]()
-        {
-            batchAnimating = false;
-            animation->deleteLater();
-        }
-    );
-
-    animation->start();
 }
 
 

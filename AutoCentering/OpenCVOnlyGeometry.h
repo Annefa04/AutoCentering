@@ -16,6 +16,9 @@ struct OpenCVOnlySegmentationResult
 
     std::string message;
 
+    // NOTE: if maxImageSide is used these images/masks are at the
+    // WORKING (downscaled) resolution. Contours/boxes/outerCableMask
+    // are always in ORIGINAL image coordinates.
     cv::Mat grayImage;
     cv::Mat enhancedImage;
 
@@ -41,6 +44,9 @@ struct OpenCVOnlySegmentationResult
     cv::Mat candidateVisualization;
 
     int contourCount = 0;
+
+    // time spent in segmentFullImage (milliseconds)
+    double processingTimeMs = 0.0;
 };
 
 // ============================================================
@@ -54,7 +60,7 @@ struct YOLOGuidedRefinementResult
 
     std::string message;
 
-    // ROI extracted using YOLO detection
+    // ROI extracted using YOLO detection (full image coordinates)
     cv::Rect roi;
 
     // Refined geometry in FULL IMAGE coordinates
@@ -64,13 +70,52 @@ struct YOLOGuidedRefinementResult
 
     cv::RotatedRect refinedRotatedBoundingBox;
 
-    // Visual results
+    // Only filled when RefinementOptions::buildVisualizations = true
     cv::Mat roiVisualization;
     cv::Mat fullImageVisualization;
 
-    // Original OpenCV segmentation diagnostics.
-    // These coordinates remain ROI-local.
+    // Geometry is ROI-local (original ROI scale). Masks/images are only
+    // filled when buildVisualizations = true, at working resolution.
     OpenCVOnlySegmentationResult segmentation;
+
+    // time spent in refineWithinYOLORegion (milliseconds)
+    double processingTimeMs = 0.0;
+};
+
+// ============================================================
+// OPTIONS - GEOMETRIC (OpenCV-only) METHOD
+// Defaults reproduce the original results.
+// ============================================================
+
+struct SegmentationOptions
+{
+    bool saveDiagnostics = false;   // write images/report to outputDirectory (slow)
+    bool buildVisualizations = false;   // fill candidateVisualization / allContoursImage / combined masks
+    std::string outputDirectory;
+
+    int  maxImageSide = 0;              // 0 = no downscale (identical to original). Try 1280 / 1024
+    bool needAllMasks = true;           // false: Otsu Inverse + Adaptive Inverse C2 only (faster)
+    std::vector<int> kernelSizes = { 3, 5, 7 };   // try { 3, 5 } for speed
+    bool parallel = true;               // run mask/kernel combinations on several cores
+};
+
+// ============================================================
+// OPTIONS - HYBRID (YOLO + Geometric) METHOD
+// Defaults reproduce the original results.
+// ============================================================
+
+struct RefinementOptions
+{
+    bool saveDiagnostics = false;
+    bool buildVisualizations = false;
+    std::string outputDirectory;
+
+    float paddingRatio = 0.25f;         // original value. Try 0.15
+    int   maxRoiSide = 0;             // 0 = no downscale. Try 640
+
+    bool needAllMasks = true;           // false: Otsu Inverse + Adaptive Inverse C2 only
+    std::vector<int> kernelSizes = { 3, 5, 7 };   // try { 3, 5 }
+    bool parallel = true;
 };
 
 // ============================================================
@@ -81,15 +126,27 @@ class OpenCVOnlyGeometry
 {
 public:
 
-    // Existing OpenCV-only method.
-    // Keep this method unchanged.
+    // Fast Geometric method with options.
+    static OpenCVOnlySegmentationResult segmentFullImage(
+        const cv::Mat& bgrImage,
+        const SegmentationOptions& options
+    );
+
+    // Old signature (same behaviour as before: visualizations ON,
+    // diagnostics saved only if outputDirectory is not empty).
     static OpenCVOnlySegmentationResult segmentFullImage(
         const cv::Mat& bgrImage,
         const std::string& outputDirectory = ""
     );
 
-    // New hybrid method:
-    // YOLO bounding box -> ROI -> OpenCV refinement.
+    // Fast hybrid method with options.
+    static YOLOGuidedRefinementResult refineWithinYOLORegion(
+        const cv::Mat& bgrImage,
+        const cv::RotatedRect& yoloBoundingBox,
+        const RefinementOptions& options
+    );
+
+    // Old signature (diagnostics/visualizations ON only if outputDirectory is not empty).
     static YOLOGuidedRefinementResult refineWithinYOLORegion(
         const cv::Mat& bgrImage,
         const cv::RotatedRect& yoloBoundingBox,

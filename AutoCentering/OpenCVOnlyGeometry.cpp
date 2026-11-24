@@ -1,59 +1,75 @@
+// ============================================================
+// OpenCVOnlyGeometry.cpp  -  FAST VERSION (single file)
+//
+// Replace your whole OpenCVOnlyGeometry.cpp with this file and
+// REMOVE OpenCVOnlyGeometry_Refine.cpp from the project (if added).
+//
+// Same selection logic / scoring as the original code, but:
+//   - CLAHE and kernels created once
+//   - no repeated full-image mask drawing
+//   - candidate masks drawn only inside their bounding rect (hybrid)
+//   - mask/kernel combinations run in parallel (cv::parallel_for_)
+//   - optional downscale (maxImageSide / maxRoiSide)
+//   - segmentFullImage is NOT called inside the hybrid any more
+//   - no disk writes / visualizations unless requested
+//
+// Build in RELEASE (x64) and run with Ctrl+F5 for real timings.
+// Requires C++17 (std::filesystem).
+// ============================================================
+
 #include "OpenCVOnlyGeometry.h"
 
 #include <opencv2/opencv.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <climits>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
-#include <iostream>
+#include <functional>
 #include <string>
 #include <vector>
 
 namespace
 {
     // ============================================================
-    // SAVE DIAGNOSTIC IMAGE
+    // GENERAL HELPERS
     // ============================================================
 
-    // Set to true only when you need intermediate diagnostic PNG files.
-    // Keeping this false avoids repeated disk writes during normal processing.
-    constexpr bool SAVE_DIAGNOSTIC_IMAGES = false;
+    cv::Ptr<cv::CLAHE>& getClahe()
+    {
+        thread_local cv::Ptr<cv::CLAHE> clahe =
+            cv::createCLAHE(2.0, cv::Size(8, 8));
+        return clahe;
+    }
 
-    void saveDiagnostic(
+    void saveFast(
         const std::string& directory,
         const std::string& filename,
         const cv::Mat& image)
     {
-        if (!SAVE_DIAGNOSTIC_IMAGES ||
-            directory.empty() ||
-            image.empty())
-        {
+        if (directory.empty() || image.empty())
             return;
-        }
 
         try
         {
-            std::string path = directory;
+            const std::vector<int> params =
+            {
+                cv::IMWRITE_PNG_COMPRESSION, 1
+            };
 
-            if (path.back() != '/' && path.back() != '\\')
-                path += '/';
-
-            path += filename;
-            cv::imwrite(path, image);
-        }
-        catch (const cv::Exception&)
-        {
-            // Diagnostic saving must not interrupt image processing.
+            cv::imwrite(
+                (std::filesystem::path(directory) / filename).string(),
+                image,
+                params
+            );
         }
         catch (...)
         {
-            // Ignore diagnostic I/O errors.
+            // Diagnostic saving must not interrupt processing.
         }
     }
-
-    // ============================================================
-    // DRAW ROTATED BOUNDING BOX
-    // ============================================================
 
     void drawRotatedBox(
         cv::Mat& image,
@@ -62,7 +78,6 @@ namespace
         int thickness = 2)
     {
         cv::Point2f corners[4];
-
         rotatedBox.points(corners);
 
         for (int i = 0; i < 4; ++i)
@@ -78,8 +93,167 @@ namespace
         }
     }
 
+    // Gray without copying when the input is already single-channel.
+    bool toGrayView(const cv::Mat& input, cv::Mat& gray)
+    {
+        if (input.empty() || input.depth() != CV_8U)
+            return false;
+
+        if (input.channels() == 1)
+            gray = input;
+        else if (input.channels() == 3)
+            cv::cvtColor(input, gray, cv::COLOR_BGR2GRAY);
+        else if (input.channels() == 4)
+            cv::cvtColor(input, gray, cv::COLOR_BGRA2GRAY);
+        else
+            return false;
+
+        return !gray.empty();
+    }
+
+    bool toBgrCopy(const cv::Mat& input, cv::Mat& bgr)
+    {
+        if (input.empty() || input.depth() != CV_8U)
+            return false;
+
+        if (input.channels() == 1)
+            cv::cvtColor(input, bgr, cv::COLOR_GRAY2BGR);
+        else if (input.channels() == 3)
+            bgr = input.clone();
+        else if (input.channels() == 4)
+            cv::cvtColor(input, bgr, cv::COLOR_BGRA2BGR);
+        else
+            return false;
+
+        return !bgr.empty();
+    }
+
+    std::vector<cv::Mat> makeKernels(const std::vector<int>& sizes)
+    {
+        std::vector<cv::Mat> kernels;
+
+        for (int k : sizes)
+        {
+            if (k < 1)
+                continue;
+
+            kernels.push_back(
+                cv::getStructuringElement(
+                    cv::MORPH_ELLIPSE,
+                    cv::Size(k, k)
+                )
+            );
+        }
+
+        if (kernels.empty())
+        {
+            kernels.push_back(
+                cv::getStructuringElement(
+                    cv::MORPH_ELLIPSE,
+                    cv::Size(3, 3)
+                )
+            );
+        }
+
+        return kernels;
+    }
+
+    int makeBlockSize(const cv::Mat& image)
+    {
+        int blockSize =
+            std::min(31, std::min(image.rows, image.cols));
+
+        if (blockSize % 2 == 0)
+            blockSize--;
+
+        return std::max(3, blockSize);
+    }
+
     // ============================================================
-    // COMPONENT CANDIDATE
+    // PARALLEL TASK INFRASTRUCTURE
+    // One task = one (mask, kernel) pair. Results are reduced in the
+    // original order so ties resolve exactly like the sequential code.
+    // ============================================================
+
+    struct MaskTask
+    {
+        const cv::Mat* mask = nullptr;
+        const cv::Mat* kernel = nullptr;
+    };
+
+    struct TaskBest
+    {
+        double score = -1.0;
+        std::vector<cv::Point> contour;
+        int count = 0;
+    };
+
+    std::vector<MaskTask> buildTasks(
+        const std::vector<const cv::Mat*>& masks,
+        const std::vector<cv::Mat>& kernels,
+        cv::Size requiredSize)
+    {
+        std::vector<MaskTask> tasks;
+
+        for (const cv::Mat* mask : masks)
+        {
+            if (mask == nullptr || mask->empty())
+                continue;
+
+            if (mask->size() != requiredSize)
+                continue;
+
+            for (const cv::Mat& kernel : kernels)
+            {
+                MaskTask t;
+                t.mask = mask;
+                t.kernel = &kernel;
+                tasks.push_back(t);
+            }
+        }
+
+        return tasks;
+    }
+
+    void runTasks(
+        int taskCount,
+        bool parallel,
+        const std::function<void(const cv::Range&)>& body)
+    {
+        if (taskCount <= 0)
+            return;
+
+        if (parallel && taskCount > 1)
+            cv::parallel_for_(cv::Range(0, taskCount), body, taskCount);
+        else
+            body(cv::Range(0, taskCount));
+    }
+
+    bool reduceBest(
+        const std::vector<TaskBest>& results,
+        std::vector<cv::Point>& bestContour,
+        int& totalContours)
+    {
+        totalContours = 0;
+
+        double bestScore = -1.0;
+
+        for (const TaskBest& tb : results)
+        {
+            totalContours += tb.count;
+
+            if (!tb.contour.empty() && tb.score > bestScore)
+            {
+                bestScore = tb.score;
+                bestContour = tb.contour;
+            }
+        }
+
+        return !bestContour.empty();
+    }
+
+    // ============================================================
+    // COMPONENT CANDIDATE (OpenCV-only method)
     // ============================================================
 
     struct ComponentCandidate
@@ -96,24 +270,19 @@ namespace
         double score = 0.0;
     };
 
-    // ============================================================
-    // EVALUATE COMPONENT FOR OPENCV-ONLY DETECTION
-    // ============================================================
-
     bool evaluateComponent(
         const std::vector<cv::Point>& contour,
         cv::Size imageSize,
+        double minSide,
         ComponentCandidate& candidate)
     {
         if (contour.size() < 5)
             return false;
 
         const double imageArea =
-            static_cast<double>(imageSize.width) *
-            imageSize.height;
+            static_cast<double>(imageSize.width) * imageSize.height;
 
-        const double area =
-            cv::contourArea(contour);
+        const double area = cv::contourArea(contour);
 
         if (area < imageArea * 0.00005)
             return false;
@@ -121,35 +290,28 @@ namespace
         if (area > imageArea * 0.60)
             return false;
 
-        const cv::RotatedRect rotatedBox =
-            cv::minAreaRect(contour);
+        const cv::RotatedRect rotatedBox = cv::minAreaRect(contour);
 
         const double width = rotatedBox.size.width;
         const double height = rotatedBox.size.height;
 
-
-        if (width < 5.0 || height < 5.0)
+        if (width < minSide || height < minSide)
             return false;
 
-        const double longerSide =
-            std::max(width, height);
-
-        const double shorterSide =
-            std::min(width, height);
+        const double longerSide = std::max(width, height);
+        const double shorterSide = std::min(width, height);
 
         if (shorterSide <= 0.0)
             return false;
 
-        const double aspectRatio =
-            longerSide / shorterSide;
+        const double aspectRatio = longerSide / shorterSide;
 
         if (aspectRatio > 4.5)
             return false;
 
-        const cv::Rect box =
-            cv::boundingRect(contour);
+        const cv::Rect box = cv::boundingRect(contour);
 
-        if (box.width < 5 || box.height < 5)
+        if (box.width < minSide || box.height < minSide)
             return false;
 
         const double boxArea =
@@ -161,17 +323,14 @@ namespace
         const double extent = area / boxArea;
 
         std::vector<cv::Point> hull;
-
         cv::convexHull(contour, hull);
 
-        const double hullArea =
-            cv::contourArea(hull);
+        const double hullArea = cv::contourArea(hull);
 
         if (hullArea <= 0.0)
             return false;
 
-        const double solidity =
-            area / hullArea;
+        const double solidity = area / hullArea;
 
         if (solidity < 0.35)
             return false;
@@ -194,614 +353,338 @@ namespace
     }
 
     // ============================================================
-    // FIND MAIN COMPONENT FOR OPENCV-ONLY METHOD
+    // FIND MAIN COMPONENT (OpenCV-only method) - fast/parallel
     // ============================================================
 
-    bool findMainComponentContour(
-        const std::vector<cv::Mat>& thresholdMasks,
+    bool findMainComponentFast(
+        const std::vector<const cv::Mat*>& masks,
+        const std::vector<cv::Mat>& kernels,
         cv::Size imageSize,
-        std::vector<cv::Point>& selectedContour,
-        cv::Mat& selectedMask,
-        cv::Rect& selectedBoundingBox,
-        cv::RotatedRect& selectedRotatedBox,
+        double minSide,
+        bool parallel,
+        std::vector<cv::Point>& bestContour,
         int& totalContours)
     {
-        double bestScore = -1.0;
+        const std::vector<MaskTask> tasks =
+            buildTasks(masks, kernels, imageSize);
 
-        totalContours = 0;
+        std::vector<TaskBest> results(tasks.size());
 
-        const int kernelSizes[] = { 3, 5 };
-
-        for (const cv::Mat& sourceMask : thresholdMasks)
-        {
-            if (sourceMask.empty())
-                continue;
-
-            for (int kernelSize : kernelSizes)
+        const auto body = [&](const cv::Range& range)
             {
                 cv::Mat processedMask;
 
-                const cv::Mat kernel =
-                    cv::getStructuringElement(
-                        cv::MORPH_ELLIPSE,
-                        cv::Size(kernelSize, kernelSize)
+                for (int t = range.start; t < range.end; ++t)
+                {
+                    TaskBest& tb = results[t];
+
+                    cv::morphologyEx(
+                        *tasks[t].mask,
+                        processedMask,
+                        cv::MORPH_CLOSE,
+                        *tasks[t].kernel
                     );
 
-                cv::morphologyEx(
-                    sourceMask,
-                    processedMask,
-                    cv::MORPH_CLOSE,
-                    kernel
-                );
+                    std::vector<std::vector<cv::Point>> contours;
 
-                std::vector<std::vector<cv::Point>> contours;
+                    cv::findContours(
+                        processedMask,
+                        contours,
+                        cv::RETR_EXTERNAL,
+                        cv::CHAIN_APPROX_SIMPLE
+                    );
 
-                cv::findContours(
-                    processedMask,
-                    contours,
-                    cv::RETR_EXTERNAL,
-                    cv::CHAIN_APPROX_SIMPLE
-                );
+                    tb.count = static_cast<int>(contours.size());
 
-                totalContours +=
-                    static_cast<int>(contours.size());
-
-                for (const auto& contour : contours)
-                {
-                    ComponentCandidate candidate;
-
-                    if (!evaluateComponent(
-                        contour,
-                        imageSize,
-                        candidate))
+                    for (const auto& contour : contours)
                     {
-                        continue;
-                    }
+                        ComponentCandidate candidate;
 
-                    if (candidate.score > bestScore)
-                    {
-                        bestScore = candidate.score;
-
-                        selectedContour = candidate.contour;
-                        selectedBoundingBox = candidate.boundingBox;
-                        selectedRotatedBox = candidate.rotatedBox;
-
-                        selectedMask =
-                            cv::Mat::zeros(
-                                imageSize,
-                                CV_8UC1
-                            );
-
-                        std::vector<std::vector<cv::Point>> selected =
+                        if (!evaluateComponent(
+                            contour,
+                            imageSize,
+                            minSide,
+                            candidate))
                         {
-                            selectedContour
-                        };
+                            continue;
+                        }
 
-                        cv::drawContours(
-                            selectedMask,
-                            selected,
-                            0,
-                            cv::Scalar(255),
-                            cv::FILLED
-                        );
+                        if (candidate.score > tb.score)
+                        {
+                            tb.score = candidate.score;
+                            tb.contour = candidate.contour;
+                        }
                     }
                 }
-            }
-        }
+            };
 
-        return !selectedContour.empty();
+        runTasks(static_cast<int>(tasks.size()), parallel, body);
+
+        return reduceBest(results, bestContour, totalContours);
     }
 
     // ============================================================
-    // YOLO-GUIDED CONTOUR CANDIDATE
+    // FIND BEST YOLO-GUIDED CONTOUR - fast/parallel
+    // (same scoring as the original findBestYOLOGuidedContour)
     // ============================================================
 
-    struct YOLOGuidedCandidate
-    {
-        std::vector<cv::Point> contour;
-
-        cv::Rect boundingBox;
-        cv::RotatedRect rotatedBox;
-
-        double area = 0.0;
-        double overlapRatio = 0.0;
-        double yoloCoverage = 0.0;
-        double iou = 0.0;
-        double centreScore = 0.0;
-        double areaScore = 0.0;
-        double solidity = 0.0;
-        double aspectRatio = 0.0;
-
-        double finalScore = -1.0;
-    };
-
-    // ============================================================
-    // SELECT BEST CONTOUR USING YOLO AS REFERENCE
-    // ============================================================
-
-    bool findBestYOLOGuidedContour(
-        const std::vector<cv::Mat>& masks,
+    bool findBestYOLOGuidedContourFast(
+        const std::vector<const cv::Mat*>& masks,
+        const std::vector<cv::Mat>& kernels,
         const cv::Mat& yoloMask,
+        const cv::Rect& yoloBounds,
+        double yoloArea,
         const cv::RotatedRect& localYOLOBox,
+        double minSide,
+        bool parallel,
         std::vector<cv::Point>& bestContour,
-        cv::Mat& bestContourMask,
         int& totalContours)
     {
         totalContours = 0;
-
-        double bestScore = -1.0;
-
-        const double yoloArea =
-            static_cast<double>(
-                cv::countNonZero(yoloMask)
-                );
 
         if (yoloArea <= 0.0)
             return false;
 
         const double referenceDiagonal =
             std::sqrt(
-                localYOLOBox.size.width *
-                localYOLOBox.size.width +
-                localYOLOBox.size.height *
-                localYOLOBox.size.height
+                static_cast<double>(localYOLOBox.size.width) * localYOLOBox.size.width +
+                static_cast<double>(localYOLOBox.size.height) * localYOLOBox.size.height
             );
 
         if (referenceDiagonal <= 0.0)
             return false;
 
-        const int kernelSizes[] = { 3, 5 };
+        const cv::Rect imageRect(0, 0, yoloMask.cols, yoloMask.rows);
 
-        for (const cv::Mat& sourceMask : masks)
-        {
-            if (sourceMask.empty())
-                continue;
+        const std::vector<MaskTask> tasks =
+            buildTasks(masks, kernels, yoloMask.size());
 
-            if (sourceMask.size() != yoloMask.size())
-                continue;
+        std::vector<TaskBest> results(tasks.size());
 
-            for (int kernelSize : kernelSizes)
+        const auto body = [&](const cv::Range& range)
             {
                 cv::Mat processedMask;
+                cv::Mat patch;
+                cv::Mat intersectionPatch;
 
-                const cv::Mat kernel =
-                    cv::getStructuringElement(
-                        cv::MORPH_ELLIPSE,
-                        cv::Size(kernelSize, kernelSize)
-                    );
-
-                cv::morphologyEx(
-                    sourceMask,
-                    processedMask,
-                    cv::MORPH_CLOSE,
-                    kernel
-                );
-
-                std::vector<std::vector<cv::Point>> contours;
-
-                cv::findContours(
-                    processedMask,
-                    contours,
-                    cv::RETR_EXTERNAL,
-                    cv::CHAIN_APPROX_SIMPLE
-                );
-
-                totalContours +=
-                    static_cast<int>(contours.size());
-
-                for (const auto& contour : contours)
+                for (int t = range.start; t < range.end; ++t)
                 {
-                    if (contour.size() < 5)
-                        continue;
+                    TaskBest& tb = results[t];
 
-                    const double contourArea =
-                        cv::contourArea(contour);
+                    cv::morphologyEx(
+                        *tasks[t].mask,
+                        processedMask,
+                        cv::MORPH_CLOSE,
+                        *tasks[t].kernel
+                    );
 
-                    // Reject very small noise.
-                    if (contourArea < yoloArea * 0.05)
-                        continue;
+                    std::vector<std::vector<cv::Point>> contours;
 
-                    // Reject candidates that are excessively
-                    // larger than the YOLO reference region.
-                    if (contourArea > yoloArea * 2.50)
-                        continue;
+                    cv::findContours(
+                        processedMask,
+                        contours,
+                        cv::RETR_EXTERNAL,
+                        cv::CHAIN_APPROX_SIMPLE
+                    );
 
-                    const cv::RotatedRect rotatedBox =
-                        cv::minAreaRect(contour);
+                    tb.count = static_cast<int>(contours.size());
 
-                    const double width =
-                        rotatedBox.size.width;
-
-                    const double height =
-                        rotatedBox.size.height;
-
-                    if (width < 5.0 || height < 5.0)
-                        continue;
-
-                    const double longerSide =
-                        std::max(width, height);
-
-                    const double shorterSide =
-                        std::min(width, height);
-
-                    if (shorterSide <= 0.0)
-                        continue;
-
-                    const double aspectRatio =
-                        longerSide / shorterSide;
-
-                    // Reject very thin wire-like contours.
-                    // This is deliberately more permissive than
-                    // the OpenCV-only method.
-                    if (aspectRatio > 10.0)
-                        continue;
-
-                    // ----------------------------------------
-                    // CREATE CANDIDATE MASK
-                    // ----------------------------------------
-
-                    cv::Mat candidateMask =
-                        cv::Mat::zeros(
-                            yoloMask.size(),
-                            CV_8UC1
-                        );
-
-                    std::vector<std::vector<cv::Point>> candidateContours =
+                    for (int idx = 0; idx < static_cast<int>(contours.size()); ++idx)
                     {
-                        contour
-                    };
+                        const std::vector<cv::Point>& contour = contours[idx];
 
-                    cv::drawContours(
-                        candidateMask,
-                        candidateContours,
-                        0,
-                        cv::Scalar(255),
-                        cv::FILLED
-                    );
+                        if (contour.size() < 5)
+                            continue;
 
-                    const double candidatePixelArea =
-                        cv::countNonZero(candidateMask);
+                        const double contourArea = cv::contourArea(contour);
 
-                    if (candidatePixelArea <= 0.0)
-                        continue;
+                        if (contourArea < yoloArea * 0.05)
+                            continue;
 
-                    // ----------------------------------------
-                    // YOLO / CONTOUR INTERSECTION
-                    // ----------------------------------------
+                        if (contourArea > yoloArea * 2.50)
+                            continue;
 
-                    cv::Mat intersectionMask;
+                        const cv::RotatedRect rotatedBox = cv::minAreaRect(contour);
 
-                    cv::bitwise_and(
-                        candidateMask,
-                        yoloMask,
-                        intersectionMask
-                    );
+                        const double width = rotatedBox.size.width;
+                        const double height = rotatedBox.size.height;
 
-                    const double intersectionArea =
-                        cv::countNonZero(intersectionMask);
+                        if (width < minSide || height < minSide)
+                            continue;
 
-                    const double unionArea =
-                        candidatePixelArea +
-                        yoloArea -
-                        intersectionArea;
+                        const double longerSide = std::max(width, height);
+                        const double shorterSide = std::min(width, height);
 
-                    if (unionArea <= 0.0)
-                        continue;
+                        if (shorterSide <= 0.0)
+                            continue;
 
-                    // Percentage of candidate inside YOLO.
-                    const double overlapRatio =
-                        intersectionArea /
-                        candidatePixelArea;
+                        if (longerSide / shorterSide > 10.0)
+                            continue;
 
-                    // Percentage of YOLO region covered by candidate.
-                    const double yoloCoverage =
-                        intersectionArea /
-                        yoloArea;
+                        // Cheap reject: must touch the YOLO region,
+                        // otherwise overlapRatio would be 0 (< 0.30).
+                        const cv::Rect br = cv::boundingRect(contour) & imageRect;
 
-                    const double iou =
-                        intersectionArea /
-                        unionArea;
+                        if (br.width <= 0 || br.height <= 0)
+                            continue;
 
-                    // Reject candidates that barely overlap YOLO.
-                    if (overlapRatio < 0.30)
-                        continue;
+                        if ((br & yoloBounds).area() <= 0)
+                            continue;
 
-                    if (yoloCoverage < 0.20)
-                        continue;
+                        // Candidate mask only inside its bounding rect.
+                        patch.create(br.size(), CV_8UC1);
+                        patch.setTo(cv::Scalar(0));
 
-                    // ----------------------------------------
-                    // CENTRE DISTANCE
-                    // ----------------------------------------
-
-                    const cv::Moments moments =
-                        cv::moments(contour);
-
-                    if (std::abs(moments.m00) < 1e-6)
-                        continue;
-
-                    const cv::Point2f candidateCentre(
-                        static_cast<float>(
-                            moments.m10 / moments.m00
-                            ),
-                        static_cast<float>(
-                            moments.m01 / moments.m00
-                            )
-                    );
-
-                    const double centreDistance =
-                        cv::norm(
-                            candidateCentre -
-                            localYOLOBox.center
+                        cv::drawContours(
+                            patch,
+                            contours,
+                            idx,
+                            cv::Scalar(255),
+                            cv::FILLED,
+                            cv::LINE_8,
+                            cv::noArray(),
+                            INT_MAX,
+                            cv::Point(-br.x, -br.y)
                         );
 
-                    const double normalizedDistance =
-                        centreDistance /
-                        referenceDiagonal;
+                        const double candidatePixelArea =
+                            static_cast<double>(cv::countNonZero(patch));
 
-                    const double centreScore =
-                        std::exp(
-                            -2.0 * normalizedDistance
+                        if (candidatePixelArea <= 0.0)
+                            continue;
+
+                        cv::bitwise_and(
+                            patch,
+                            yoloMask(br),
+                            intersectionPatch
                         );
 
-                    // ----------------------------------------
-                    // AREA SIMILARITY
-                    // ----------------------------------------
+                        const double intersectionArea =
+                            static_cast<double>(cv::countNonZero(intersectionPatch));
 
-                    const double areaRatio =
-                        candidatePixelArea / yoloArea;
+                        const double unionArea =
+                            candidatePixelArea + yoloArea - intersectionArea;
 
-                    const double areaScore =
-                        std::exp(
-                            -0.65 *
-                            std::abs(
-                                std::log(
-                                    std::max(areaRatio, 1e-6)
-                                )
-                            )
+                        if (unionArea <= 0.0)
+                            continue;
+
+                        const double overlapRatio =
+                            intersectionArea / candidatePixelArea;
+
+                        const double yoloCoverage =
+                            intersectionArea / yoloArea;
+
+                        const double iou =
+                            intersectionArea / unionArea;
+
+                        if (overlapRatio < 0.30)
+                            continue;
+
+                        if (yoloCoverage < 0.20)
+                            continue;
+
+                        const cv::Moments moments = cv::moments(contour);
+
+                        if (std::abs(moments.m00) < 1e-6)
+                            continue;
+
+                        const cv::Point2f candidateCentre(
+                            static_cast<float>(moments.m10 / moments.m00),
+                            static_cast<float>(moments.m01 / moments.m00)
                         );
 
-                    // ----------------------------------------
-                    // CONTOUR SOLIDITY
-                    // ----------------------------------------
+                        const double normalizedDistance =
+                            cv::norm(candidateCentre - localYOLOBox.center) /
+                            referenceDiagonal;
 
-                    std::vector<cv::Point> hull;
+                        const double centreScore =
+                            std::exp(-2.0 * normalizedDistance);
 
-                    cv::convexHull(contour, hull);
+                        const double areaRatio =
+                            candidatePixelArea / yoloArea;
 
-                    const double hullArea =
-                        cv::contourArea(hull);
+                        const double areaScore =
+                            std::exp(
+                                -0.65 *
+                                std::abs(std::log(std::max(areaRatio, 1e-6)))
+                            );
 
-                    if (hullArea <= 0.0)
-                        continue;
+                        std::vector<cv::Point> hull;
+                        cv::convexHull(contour, hull);
 
-                    const double solidity =
-                        contourArea / hullArea;
+                        const double hullArea = cv::contourArea(hull);
 
-                    if (solidity < 0.30)
-                        continue;
+                        if (hullArea <= 0.0)
+                            continue;
 
-                    // ----------------------------------------
-                    // FINAL SCORE
-                    // ----------------------------------------
+                        const double solidity = contourArea / hullArea;
 
-                    // YOLO overlap is important, but the score
-                    // also rewards contours that cover the
-                    // detected component and have a plausible
-                    // centre and area.
+                        if (solidity < 0.30)
+                            continue;
 
-                    const double finalScore =
-                        (0.25 * overlapRatio) +
-                        (0.25 * yoloCoverage) +
-                        (0.20 * iou) +
-                        (0.15 * centreScore) +
-                        (0.10 * areaScore) +
-                        (0.05 * solidity);
+                        const double finalScore =
+                            (0.25 * overlapRatio) +
+                            (0.25 * yoloCoverage) +
+                            (0.20 * iou) +
+                            (0.15 * centreScore) +
+                            (0.10 * areaScore) +
+                            (0.05 * solidity);
 
-                    if (finalScore > bestScore)
-                    {
-                        bestScore = finalScore;
-
-                        bestContour = contour;
-
-                        bestContourMask =
-                            candidateMask.clone();
+                        if (finalScore > tb.score)
+                        {
+                            tb.score = finalScore;
+                            tb.contour = contour;
+                        }
                     }
                 }
-            }
-        }
+            };
 
-        return !bestContour.empty();
+        runTasks(static_cast<int>(tasks.size()), parallel, body);
+
+        return reduceBest(results, bestContour, totalContours);
     }
 
     // ============================================================
-    // CONVERT IMAGE TO GRAYSCALE
+    // SHARED PREPROCESSING: gray -> CLAHE -> blur -> masks
     // ============================================================
 
-    bool convertToGray(
-        const cv::Mat& input,
-        cv::Mat& gray)
+    struct MaskSet
     {
-        if (input.empty() || input.depth() != CV_8U)
-            return false;
+        cv::Mat enhanced;
+        cv::Mat otsuNormal;
+        cv::Mat otsuInverse;
+        cv::Mat adaptiveNormal;
+        cv::Mat adaptiveInverse;
+        cv::Mat adaptiveInverseC2;
+    };
 
-        if (input.channels() == 1)
-        {
-            gray = input.clone();
-        }
-        else if (input.channels() == 3)
-        {
-            cv::cvtColor(
-                input,
-                gray,
-                cv::COLOR_BGR2GRAY
-            );
-        }
-        else if (input.channels() == 4)
-        {
-            cv::cvtColor(
-                input,
-                gray,
-                cv::COLOR_BGRA2GRAY
-            );
-        }
-        else
-        {
-            return false;
-        }
-
-        return !gray.empty();
-    }
-}
-
-// ============================================================
-// OPENCV-ONLY COMPONENT SEGMENTATION
-// ============================================================
-
-static OpenCVOnlySegmentationResult segmentFullImageInternal(
-    const cv::Mat& bgrImage,
-    const std::string& outputDirectory,
-    bool performOpenCVOnlyContourSelection)
-{
-    OpenCVOnlySegmentationResult result;
-
-    try
+    void buildMasks(
+        const cv::Mat& workGray,
+        bool needAllMasks,
+        MaskSet& m)
     {
-        // ----------------------------------------------------
-        // 1. VALIDATE IMAGE
-        // ----------------------------------------------------
-
-        if (bgrImage.empty())
-        {
-            result.message = "Input image is empty.";
-            return result;
-        }
-
-        if (bgrImage.cols < 32 || bgrImage.rows < 32)
-        {
-            result.message = "Input image is too small.";
-            return result;
-        }
-
-        // ----------------------------------------------------
-        // 2. GRAYSCALE
-        // ----------------------------------------------------
-
-        if (!convertToGray(bgrImage, result.grayImage))
-        {
-            result.message = "Unsupported image format.";
-            return result;
-        }
-
-        saveDiagnostic(
-            outputDirectory,
-            "01_grayscale.png",
-            result.grayImage
-        );
-
-        // ----------------------------------------------------
-        // 3. CONTRAST ENHANCEMENT
-        // ----------------------------------------------------
-
-        cv::Ptr<cv::CLAHE> clahe =
-            cv::createCLAHE(
-                2.0,
-                cv::Size(8, 8)
-            );
-
-        clahe->apply(
-            result.grayImage,
-            result.enhancedImage
-        );
+        getClahe()->apply(workGray, m.enhanced);
 
         cv::GaussianBlur(
-            result.enhancedImage,
-            result.enhancedImage,
+            m.enhanced,
+            m.enhanced,
             cv::Size(3, 3),
             0.8
         );
 
-        saveDiagnostic(
-            outputDirectory,
-            "02_enhanced.png",
-            result.enhancedImage
-        );
-
-        // ----------------------------------------------------
-        // 4. OTSU NORMAL
-        // ----------------------------------------------------
+        const int blockSize = makeBlockSize(m.enhanced);
 
         cv::threshold(
-            result.enhancedImage,
-            result.otsuNormalMask,
-            0,
-            255,
-            cv::THRESH_BINARY | cv::THRESH_OTSU
-        );
-
-        saveDiagnostic(
-            outputDirectory,
-            "03_otsu_normal.png",
-            result.otsuNormalMask
-        );
-
-        // ----------------------------------------------------
-        // 5. OTSU INVERSE
-        // ----------------------------------------------------
-
-        cv::threshold(
-            result.enhancedImage,
-            result.otsuInverseMask,
+            m.enhanced,
+            m.otsuInverse,
             0,
             255,
             cv::THRESH_BINARY_INV | cv::THRESH_OTSU
         );
 
-        saveDiagnostic(
-            outputDirectory,
-            "04_otsu_inverse.png",
-            result.otsuInverseMask
-        );
-
-        // ----------------------------------------------------
-        // 6. ADAPTIVE THRESHOLD
-        // ----------------------------------------------------
-
-        int blockSize = std::min(
-            31,
-            std::min(
-                result.enhancedImage.rows,
-                result.enhancedImage.cols
-            )
-        );
-
-        if (blockSize % 2 == 0)
-            blockSize--;
-
-        blockSize = std::max(3, blockSize);
-
         cv::adaptiveThreshold(
-            result.enhancedImage,
-            result.adaptiveNormalMask,
-            255,
-            cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv::THRESH_BINARY,
-            blockSize,
-            4
-        );
-
-        cv::adaptiveThreshold(
-            result.enhancedImage,
-            result.adaptiveInverseMask,
-            255,
-            cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv::THRESH_BINARY_INV,
-            blockSize,
-            4
-        );
-
-        cv::adaptiveThreshold(
-            result.enhancedImage,
-            result.adaptiveInverseC2Mask,
+            m.enhanced,
+            m.adaptiveInverseC2,
             255,
             cv::ADAPTIVE_THRESH_GAUSSIAN_C,
             cv::THRESH_BINARY_INV,
@@ -809,172 +692,220 @@ static OpenCVOnlySegmentationResult segmentFullImageInternal(
             2
         );
 
-        saveDiagnostic(
-            outputDirectory,
-            "05_adaptive_normal.png",
-            result.adaptiveNormalMask
-        );
-
-        saveDiagnostic(
-            outputDirectory,
-            "06_adaptive_inverse.png",
-            result.adaptiveInverseMask
-        );
-
-        saveDiagnostic(
-            outputDirectory,
-            "07_adaptive_inverse_c2.png",
-            result.adaptiveInverseC2Mask
-        );
-
-        // ----------------------------------------------------
-        // 7. COMBINE INVERSE MASKS
-        // ----------------------------------------------------
-
-        cv::bitwise_or(
-            result.otsuInverseMask,
-            result.adaptiveInverseC2Mask,
-            result.combinedInverseMask
-        );
-
-        const cv::Mat smallKernel =
-            cv::getStructuringElement(
-                cv::MORPH_ELLIPSE,
-                cv::Size(3, 3)
+        if (needAllMasks)
+        {
+            cv::threshold(
+                m.enhanced,
+                m.otsuNormal,
+                0,
+                255,
+                cv::THRESH_BINARY | cv::THRESH_OTSU
             );
 
-        cv::morphologyEx(
-            result.combinedInverseMask,
-            result.closedCombinedInverseMask,
-            cv::MORPH_CLOSE,
-            smallKernel
-        );
+            cv::adaptiveThreshold(
+                m.enhanced,
+                m.adaptiveNormal,
+                255,
+                cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv::THRESH_BINARY,
+                blockSize,
+                4
+            );
 
-        saveDiagnostic(
-            outputDirectory,
-            "08_combined_inverse.png",
-            result.combinedInverseMask
-        );
+            cv::adaptiveThreshold(
+                m.enhanced,
+                m.adaptiveInverse,
+                255,
+                cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv::THRESH_BINARY_INV,
+                blockSize,
+                4
+            );
+        }
+    }
 
-        saveDiagnostic(
-            outputDirectory,
-            "09_combined_closed.png",
-            result.closedCombinedInverseMask
-        );
-
-        // ----------------------------------------------------
-        // 8. FIND MAIN COMPONENT
-        // ----------------------------------------------------
-
-        const std::vector<cv::Mat> masks =
+    std::vector<const cv::Mat*> maskPointers(const MaskSet& m)
+    {
+        // Same order as the original code.
+        return
         {
-            result.otsuNormalMask,
-            result.otsuInverseMask,
-            result.adaptiveNormalMask,
-            result.adaptiveInverseMask,
-            result.adaptiveInverseC2Mask
+            &m.otsuNormal,
+            &m.otsuInverse,
+            &m.adaptiveNormal,
+            &m.adaptiveInverse,
+            &m.adaptiveInverseC2
+        };
+    }
+}
+
+// ============================================================
+// OPENCV-ONLY COMPONENT SEGMENTATION (FAST)
+// ============================================================
+
+OpenCVOnlySegmentationResult
+OpenCVOnlyGeometry::segmentFullImage(
+    const cv::Mat& bgrImage,
+    const SegmentationOptions& opt)
+{
+    using Clock = std::chrono::steady_clock;
+    const auto tStart = Clock::now();
+
+    OpenCVOnlySegmentationResult result;
+
+    auto finish = [&]() -> OpenCVOnlySegmentationResult
+        {
+            result.processingTimeMs =
+                std::chrono::duration<double, std::milli>(
+                    Clock::now() - tStart
+                ).count();
+
+            return result;
         };
 
-        // OpenCV-only needs its own contour selection.
-        // Hybrid skips this step because it performs YOLO-guided
-        // contour selection later using the same threshold masks.
-        if (performOpenCVOnlyContourSelection)
+    try
+    {
+        // ----------------------------------------------------
+        // 1. VALIDATE
+        // ----------------------------------------------------
+
+        if (bgrImage.empty())
         {
-            result.outerContourFound =
-                findMainComponentContour(
-                    masks,
-                    result.grayImage.size(),
-                    result.outerCableContour,
-                    result.outerCableMask,
-                    result.outerBoundingBox,
-                    result.outerRotatedBoundingBox,
-                    result.contourCount
-                );
+            result.message = "Input image is empty.";
+            return finish();
         }
-        else
+
+        if (bgrImage.cols < 32 || bgrImage.rows < 32)
         {
-            result.outerContourFound = false;
-            result.contourCount = 0;
-            result.message = "Threshold masks generated for YOLO-guided refinement.";
+            result.message = "Input image is too small.";
+            return finish();
+        }
+
+        cv::Mat gray;
+
+        if (!toGrayView(bgrImage, gray))
+        {
+            result.message = "Unsupported image format.";
+            return finish();
         }
 
         // ----------------------------------------------------
-        // 9. VISUALIZATION
+        // 2. OPTIONAL DOWNSCALE
         // ----------------------------------------------------
 
-        if (bgrImage.channels() == 1)
-        {
-            cv::cvtColor(
-                bgrImage,
-                result.candidateVisualization,
-                cv::COLOR_GRAY2BGR
-            );
+        const int longSide = std::max(gray.cols, gray.rows);
 
-            result.allContoursImage =
-                result.candidateVisualization.clone();
-        }
-        else if (bgrImage.channels() == 4)
-        {
-            cv::cvtColor(
-                bgrImage,
-                result.candidateVisualization,
-                cv::COLOR_BGRA2BGR
-            );
+        const double scale =
+            (opt.maxImageSide > 0 && longSide > opt.maxImageSide)
+            ? static_cast<double>(opt.maxImageSide) / longSide
+            : 1.0;
 
-            result.allContoursImage =
-                result.candidateVisualization.clone();
-        }
+        cv::Mat workGray;
+
+        if (scale < 1.0)
+            cv::resize(gray, workGray, cv::Size(), scale, scale, cv::INTER_AREA);
         else
+            workGray = gray;
+
+        // ----------------------------------------------------
+        // 3. CLAHE + BLUR + MASKS
+        // ----------------------------------------------------
+
+        MaskSet m;
+
+        buildMasks(workGray, opt.needAllMasks, m);
+
+        result.grayImage = workGray;
+        result.enhancedImage = m.enhanced;
+        result.otsuNormalMask = m.otsuNormal;
+        result.otsuInverseMask = m.otsuInverse;
+        result.adaptiveNormalMask = m.adaptiveNormal;
+        result.adaptiveInverseMask = m.adaptiveInverse;
+        result.adaptiveInverseC2Mask = m.adaptiveInverseC2;
+
+        // Combined masks are diagnostics only (not used for selection).
+        if (opt.buildVisualizations || opt.saveDiagnostics)
         {
-            result.candidateVisualization = bgrImage.clone();
-            result.allContoursImage = bgrImage.clone();
+            cv::bitwise_or(
+                m.otsuInverse,
+                m.adaptiveInverseC2,
+                result.combinedInverseMask
+            );
+
+            cv::morphologyEx(
+                result.combinedInverseMask,
+                result.closedCombinedInverseMask,
+                cv::MORPH_CLOSE,
+                cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3))
+            );
         }
+
+        // ----------------------------------------------------
+        // 4. FIND MAIN COMPONENT (parallel)
+        // ----------------------------------------------------
+
+        const std::vector<cv::Mat> kernels = makeKernels(opt.kernelSizes);
+
+        const double minSide =
+            (scale < 1.0) ? std::max(2.0, 5.0 * scale) : 5.0;
+
+        std::vector<cv::Point> contourWork;
+
+        result.outerContourFound =
+            findMainComponentFast(
+                maskPointers(m),
+                kernels,
+                workGray.size(),
+                minSide,
+                opt.parallel,
+                contourWork,
+                result.contourCount
+            );
+
+        // ----------------------------------------------------
+        // 5. MAP RESULT TO ORIGINAL IMAGE COORDINATES
+        // ----------------------------------------------------
 
         if (result.outerContourFound)
         {
-            const std::vector<std::vector<cv::Point>> contours =
+            if (scale < 1.0)
+            {
+                const double inv = 1.0 / scale;
+
+                result.outerCableContour.reserve(contourWork.size());
+
+                for (const cv::Point& p : contourWork)
+                {
+                    result.outerCableContour.emplace_back(
+                        std::min(bgrImage.cols - 1, std::max(0, cvRound(p.x * inv))),
+                        std::min(bgrImage.rows - 1, std::max(0, cvRound(p.y * inv)))
+                    );
+                }
+            }
+            else
+            {
+                result.outerCableContour = contourWork;
+            }
+
+            result.outerBoundingBox =
+                cv::boundingRect(result.outerCableContour);
+
+            result.outerRotatedBoundingBox =
+                cv::minAreaRect(result.outerCableContour);
+
+            result.outerCableMask =
+                cv::Mat::zeros(bgrImage.size(), CV_8UC1);
+
+            const std::vector<std::vector<cv::Point>> selected =
             {
                 result.outerCableContour
             };
 
-            // Red: component outer contour.
             cv::drawContours(
-                result.candidateVisualization,
-                contours,
+                result.outerCableMask,
+                selected,
                 0,
-                cv::Scalar(0, 0, 255),
-                2,
-                cv::LINE_AA
-            );
-
-            // Blue: rotated bounding box.
-            drawRotatedBox(
-                result.candidateVisualization,
-                result.outerRotatedBoundingBox
-            );
-
-            // Green: component centre.
-            cv::circle(
-                result.candidateVisualization,
-                result.outerRotatedBoundingBox.center,
-                5,
-                cv::Scalar(0, 255, 0),
+                cv::Scalar(255),
                 cv::FILLED
-            );
-
-            cv::drawContours(
-                result.allContoursImage,
-                contours,
-                0,
-                cv::Scalar(0, 0, 255),
-                2,
-                cv::LINE_AA
-            );
-
-            saveDiagnostic(
-                outputDirectory,
-                "10_component_mask.png",
-                result.outerCableMask
             );
 
             result.message =
@@ -986,143 +917,179 @@ static OpenCVOnlySegmentationResult segmentFullImageInternal(
                 "No suitable component body was detected.";
         }
 
-        saveDiagnostic(
-            outputDirectory,
-            "11_component_result.png",
-            result.candidateVisualization
-        );
-
-        saveDiagnostic(
-            outputDirectory,
-            "12_component_contour.png",
-            result.allContoursImage
-        );
-
         // ----------------------------------------------------
-        // 10. COMPONENT INFORMATION
+        // 6. OPTIONAL VISUALIZATION / DISK OUTPUT (slow)
         // ----------------------------------------------------
 
-        if (!outputDirectory.empty() &&
-            result.outerContourFound)
+        if (opt.buildVisualizations || opt.saveDiagnostics)
         {
-            std::string reportPath = outputDirectory;
+            cv::Mat vis;
 
-            if (reportPath.back() != '/' &&
-                reportPath.back() != '\\')
+            if (toBgrCopy(bgrImage, vis))
             {
-                reportPath += '/';
+                result.candidateVisualization = vis;
+                result.allContoursImage = vis.clone();
+
+                if (result.outerContourFound)
+                {
+                    const std::vector<std::vector<cv::Point>> contours =
+                    {
+                        result.outerCableContour
+                    };
+
+                    cv::drawContours(
+                        result.candidateVisualization,
+                        contours,
+                        0,
+                        cv::Scalar(0, 0, 255),
+                        2,
+                        cv::LINE_AA
+                    );
+
+                    drawRotatedBox(
+                        result.candidateVisualization,
+                        result.outerRotatedBoundingBox
+                    );
+
+                    cv::circle(
+                        result.candidateVisualization,
+                        result.outerRotatedBoundingBox.center,
+                        5,
+                        cv::Scalar(0, 255, 0),
+                        cv::FILLED
+                    );
+
+                    cv::drawContours(
+                        result.allContoursImage,
+                        contours,
+                        0,
+                        cv::Scalar(0, 0, 255),
+                        2,
+                        cv::LINE_AA
+                    );
+                }
             }
 
-            reportPath += "13_component_information.txt";
-
-            std::ofstream report(reportPath);
-
-            if (report.is_open())
+            if (opt.saveDiagnostics && !opt.outputDirectory.empty())
             {
-                report << "OPENCV COMPONENT DETECTION\n\n";
+                std::error_code ec;
+                std::filesystem::create_directories(opt.outputDirectory, ec);
 
-                report << "Image width: "
-                    << bgrImage.cols << '\n';
+                saveFast(opt.outputDirectory, "01_grayscale.png", result.grayImage);
+                saveFast(opt.outputDirectory, "02_enhanced.png", result.enhancedImage);
+                saveFast(opt.outputDirectory, "03_otsu_normal.png", result.otsuNormalMask);
+                saveFast(opt.outputDirectory, "04_otsu_inverse.png", result.otsuInverseMask);
+                saveFast(opt.outputDirectory, "05_adaptive_normal.png", result.adaptiveNormalMask);
+                saveFast(opt.outputDirectory, "06_adaptive_inverse.png", result.adaptiveInverseMask);
+                saveFast(opt.outputDirectory, "07_adaptive_inverse_c2.png", result.adaptiveInverseC2Mask);
+                saveFast(opt.outputDirectory, "08_combined_inverse.png", result.combinedInverseMask);
+                saveFast(opt.outputDirectory, "09_combined_closed.png", result.closedCombinedInverseMask);
 
-                report << "Image height: "
-                    << bgrImage.rows << '\n';
+                if (result.outerContourFound)
+                    saveFast(opt.outputDirectory, "10_component_mask.png", result.outerCableMask);
 
-                report << "Contours examined: "
-                    << result.contourCount << '\n';
+                saveFast(opt.outputDirectory, "11_component_result.png", result.candidateVisualization);
+                saveFast(opt.outputDirectory, "12_component_contour.png", result.allContoursImage);
 
-                report << "Contour points: "
-                    << result.outerCableContour.size() << '\n';
+                if (result.outerContourFound)
+                {
+                    std::ofstream report(
+                        (std::filesystem::path(opt.outputDirectory) /
+                            "13_component_information.txt").string()
+                    );
 
-                report << "Bounding box X: "
-                    << result.outerBoundingBox.x << '\n';
-
-                report << "Bounding box Y: "
-                    << result.outerBoundingBox.y << '\n';
-
-                report << "Bounding box width: "
-                    << result.outerBoundingBox.width << '\n';
-
-                report << "Bounding box height: "
-                    << result.outerBoundingBox.height << '\n';
-
-                report << "Centre X: "
-                    << result.outerRotatedBoundingBox.center.x << '\n';
-
-                report << "Centre Y: "
-                    << result.outerRotatedBoundingBox.center.y << '\n';
-
-                report << "Rotation angle: "
-                    << result.outerRotatedBoundingBox.angle << '\n';
-
-                report << "Rotated width: "
-                    << result.outerRotatedBoundingBox.size.width << '\n';
-
-                report << "Rotated height: "
-                    << result.outerRotatedBoundingBox.size.height << '\n';
+                    if (report.is_open())
+                    {
+                        report << "OPENCV COMPONENT DETECTION\n\n";
+                        report << "Image width: " << bgrImage.cols << '\n';
+                        report << "Image height: " << bgrImage.rows << '\n';
+                        report << "Contours examined: " << result.contourCount << '\n';
+                        report << "Contour points: " << result.outerCableContour.size() << '\n';
+                        report << "Bounding box X: " << result.outerBoundingBox.x << '\n';
+                        report << "Bounding box Y: " << result.outerBoundingBox.y << '\n';
+                        report << "Bounding box width: " << result.outerBoundingBox.width << '\n';
+                        report << "Bounding box height: " << result.outerBoundingBox.height << '\n';
+                        report << "Centre X: " << result.outerRotatedBoundingBox.center.x << '\n';
+                        report << "Centre Y: " << result.outerRotatedBoundingBox.center.y << '\n';
+                        report << "Rotation angle: " << result.outerRotatedBoundingBox.angle << '\n';
+                        report << "Rotated width: " << result.outerRotatedBoundingBox.size.width << '\n';
+                        report << "Rotated height: " << result.outerRotatedBoundingBox.size.height << '\n';
+                    }
+                }
             }
         }
 
         result.success = true;
 
-        return result;
+        return finish();
     }
     catch (const cv::Exception& e)
     {
         result.success = false;
         result.outerContourFound = false;
-
-        result.message =
-            std::string("OpenCV exception: ") + e.what();
-
-        return result;
+        result.message = std::string("OpenCV exception: ") + e.what();
+        return finish();
     }
     catch (const std::exception& e)
     {
         result.success = false;
         result.outerContourFound = false;
-
-        result.message =
-            std::string("Processing exception: ") + e.what();
-
-        return result;
+        result.message = std::string("Processing exception: ") + e.what();
+        return finish();
     }
     catch (...)
     {
         result.success = false;
         result.outerContourFound = false;
-
-        result.message =
-            "Unknown error during OpenCV segmentation.";
-
-        return result;
+        result.message = "Unknown error during OpenCV segmentation.";
+        return finish();
     }
 }
 
-// Public OpenCV-only entry point. Keeps the existing header/API unchanged.
+// ============================================================
+// OLD SIGNATURE: segmentFullImage(image, outputDirectory)
+// Same behaviour as before (visualizations ON), but using the
+// fast implementation.
+// ============================================================
+
 OpenCVOnlySegmentationResult
 OpenCVOnlyGeometry::segmentFullImage(
     const cv::Mat& bgrImage,
     const std::string& outputDirectory)
 {
-    return segmentFullImageInternal(
-        bgrImage,
-        outputDirectory,
-        true
-    );
+    SegmentationOptions opt;
+
+    opt.buildVisualizations = true;
+    opt.saveDiagnostics = !outputDirectory.empty();
+    opt.outputDirectory = outputDirectory;
+
+    return segmentFullImage(bgrImage, opt);
 }
 
 // ============================================================
-// YOLO + GEOMETRIC REFINEMENT
+// YOLO + GEOMETRIC REFINEMENT (FAST HYBRID)
 // ============================================================
 
 YOLOGuidedRefinementResult
 OpenCVOnlyGeometry::refineWithinYOLORegion(
     const cv::Mat& bgrImage,
     const cv::RotatedRect& yoloBoundingBox,
-    const std::string& outputDirectory,
-    float paddingRatio)
+    const RefinementOptions& opt)
 {
+    using Clock = std::chrono::steady_clock;
+    const auto tStart = Clock::now();
+
     YOLOGuidedRefinementResult result;
+
+    auto finish = [&]() -> YOLOGuidedRefinementResult
+        {
+            result.processingTimeMs =
+                std::chrono::duration<double, std::milli>(
+                    Clock::now() - tStart
+                ).count();
+
+            return result;
+        };
 
     try
     {
@@ -1133,47 +1100,27 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
         if (bgrImage.empty())
         {
             result.message = "Input image is empty.";
-            return result;
+            return finish();
         }
 
         if (bgrImage.depth() != CV_8U)
         {
             result.message = "Image must have 8-bit pixel depth.";
-            return result;
+            return finish();
         }
 
         if (bgrImage.cols < 32 || bgrImage.rows < 32)
         {
             result.message = "Input image is too small.";
-            return result;
+            return finish();
         }
 
-        cv::Mat displaySource;
+        const int ch = bgrImage.channels();
 
-        if (bgrImage.channels() == 1)
-        {
-            cv::cvtColor(
-                bgrImage,
-                displaySource,
-                cv::COLOR_GRAY2BGR
-            );
-        }
-        else if (bgrImage.channels() == 3)
-        {
-            displaySource = bgrImage.clone();
-        }
-        else if (bgrImage.channels() == 4)
-        {
-            cv::cvtColor(
-                bgrImage,
-                displaySource,
-                cv::COLOR_BGRA2BGR
-            );
-        }
-        else
+        if (ch != 1 && ch != 3 && ch != 4)
         {
             result.message = "Unsupported image format.";
-            return result;
+            return finish();
         }
 
         // ----------------------------------------------------
@@ -1189,58 +1136,38 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
             yoloBoundingBox.size.height <= 0.0f)
         {
             result.message = "Invalid YOLO bounding box.";
-            return result;
+            return finish();
         }
 
         // ----------------------------------------------------
-        // 3. GET YOLO BOX CORNERS
+        // 3. YOLO REGION -> EXPANDED ROI (clipped)
         // ----------------------------------------------------
 
         cv::Point2f yoloCorners[4];
-
         yoloBoundingBox.points(yoloCorners);
 
-        std::vector<cv::Point2f> yoloCornerVector(
+        const std::vector<cv::Point2f> yoloCornerVector(
             yoloCorners,
             yoloCorners + 4
         );
 
-        cv::Rect yoloRectangle =
+        const cv::Rect yoloRectangle =
             cv::boundingRect(yoloCornerVector);
 
-        if (yoloRectangle.width <= 0 ||
-            yoloRectangle.height <= 0)
+        if (yoloRectangle.width <= 0 || yoloRectangle.height <= 0)
         {
             result.message = "Could not calculate YOLO region.";
-            return result;
+            return finish();
         }
 
-        // ----------------------------------------------------
-        // 4. EXPAND YOLO REGION
-        // ----------------------------------------------------
-
-        paddingRatio =
-            std::max(0.0f, std::min(0.75f, paddingRatio));
+        const float paddingRatio =
+            std::max(0.0f, std::min(0.75f, opt.paddingRatio));
 
         const int paddingX =
-            std::max(
-                12,
-                static_cast<int>(
-                    std::ceil(
-                        yoloRectangle.width * paddingRatio
-                    )
-                    )
-            );
+            std::max(12, static_cast<int>(std::ceil(yoloRectangle.width * paddingRatio)));
 
         const int paddingY =
-            std::max(
-                12,
-                static_cast<int>(
-                    std::ceil(
-                        yoloRectangle.height * paddingRatio
-                    )
-                    )
-            );
+            std::max(12, static_cast<int>(std::ceil(yoloRectangle.height * paddingRatio)));
 
         const cv::Rect expandedROI(
             yoloRectangle.x - paddingX,
@@ -1249,78 +1176,72 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
             yoloRectangle.height + 2 * paddingY
         );
 
-        // ----------------------------------------------------
-        // 5. CLIP ROI TO IMAGE
-        // ----------------------------------------------------
-
-        const cv::Rect imageBounds(
-            0,
-            0,
-            bgrImage.cols,
-            bgrImage.rows
-        );
+        const cv::Rect imageBounds(0, 0, bgrImage.cols, bgrImage.rows);
 
         result.roi = expandedROI & imageBounds;
 
-        if (result.roi.width < 32 ||
-            result.roi.height < 32)
+        if (result.roi.width < 32 || result.roi.height < 32)
         {
             result.message = "YOLO ROI is too small.";
-            return result;
+            return finish();
         }
 
         // ----------------------------------------------------
-        // 6. EXTRACT YOLO ROI
+        // 4. ROI -> GRAY (no full-image clone)
         // ----------------------------------------------------
 
-        const cv::Mat roiImage =
-            displaySource(result.roi).clone();
+        cv::Mat roiGray;
 
-        if (roiImage.empty())
+        if (!toGrayView(bgrImage(result.roi), roiGray))
         {
             result.message = "Failed to extract YOLO region.";
-            return result;
+            return finish();
         }
 
         // ----------------------------------------------------
-        // 7. GENERATE SEGMENTATION MASKS INSIDE ROI
+        // 5. OPTIONAL DOWNSCALE
         // ----------------------------------------------------
 
-        result.segmentation =
-            segmentFullImageInternal(
-                roiImage,
-                outputDirectory,
-                false
-            );
+        const int longSide = std::max(result.roi.width, result.roi.height);
 
-        if (!result.segmentation.success)
+        const double scale =
+            (opt.maxRoiSide > 0 && longSide > opt.maxRoiSide)
+            ? static_cast<double>(opt.maxRoiSide) / longSide
+            : 1.0;
+
+        cv::Mat workGray;
+
+        if (scale < 1.0)
+            cv::resize(roiGray, workGray, cv::Size(), scale, scale, cv::INTER_AREA);
+        else
+            workGray = roiGray;
+
+        // ----------------------------------------------------
+        // 6. CLAHE + BLUR + MASKS (no segmentFullImage call)
+        // ----------------------------------------------------
+
+        MaskSet m;
+
+        buildMasks(workGray, opt.needAllMasks, m);
+
+        // ----------------------------------------------------
+        // 7. YOLO BOX -> WORKING (ROI-LOCAL, SCALED) COORDINATES
+        // ----------------------------------------------------
+
+        cv::RotatedRect localYOLOBox = yoloBoundingBox;
+
+        localYOLOBox.center.x -= static_cast<float>(result.roi.x);
+        localYOLOBox.center.y -= static_cast<float>(result.roi.y);
+
+        if (scale < 1.0)
         {
-            result.message =
-                "ROI segmentation failed: " +
-                result.segmentation.message;
-
-            return result;
+            localYOLOBox.center.x *= static_cast<float>(scale);
+            localYOLOBox.center.y *= static_cast<float>(scale);
+            localYOLOBox.size.width *= static_cast<float>(scale);
+            localYOLOBox.size.height *= static_cast<float>(scale);
         }
-
-        // ----------------------------------------------------
-        // 8. CONVERT YOLO BOX TO ROI COORDINATES
-        // ----------------------------------------------------
-
-        cv::RotatedRect localYOLOBox =
-            yoloBoundingBox;
-
-        localYOLOBox.center.x -=
-            static_cast<float>(result.roi.x);
-
-        localYOLOBox.center.y -=
-            static_cast<float>(result.roi.y);
-
-        // ----------------------------------------------------
-        // 9. CREATE YOLO REFERENCE MASK
-        // ----------------------------------------------------
 
         cv::Point2f localCorners[4];
-
         localYOLOBox.points(localCorners);
 
         std::vector<cv::Point> localPolygon;
@@ -1334,57 +1255,48 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
         }
 
         cv::Mat yoloMask =
-            cv::Mat::zeros(
-                roiImage.size(),
-                CV_8UC1
-            );
-
-        const std::vector<std::vector<cv::Point>> yoloPolygons =
-        {
-            localPolygon
-        };
+            cv::Mat::zeros(m.enhanced.size(), CV_8UC1);
 
         cv::fillPoly(
             yoloMask,
-            yoloPolygons,
+            std::vector<std::vector<cv::Point>>{ localPolygon },
             cv::Scalar(255)
         );
 
-        // ----------------------------------------------------
-        // 10. COLLECT THRESHOLD MASKS
-        // ----------------------------------------------------
+        const double yoloArea =
+            static_cast<double>(cv::countNonZero(yoloMask));
 
-        const std::vector<cv::Mat> candidateMasks =
-        {
-            result.segmentation.otsuNormalMask,
-            result.segmentation.otsuInverseMask,
-            result.segmentation.adaptiveNormalMask,
-            result.segmentation.adaptiveInverseMask,
-            result.segmentation.adaptiveInverseC2Mask
-        };
+        const cv::Rect yoloBounds =
+            cv::boundingRect(localPolygon) &
+            cv::Rect(0, 0, yoloMask.cols, yoloMask.rows);
 
         // ----------------------------------------------------
-        // 11. FIND BEST YOLO-GUIDED CONTOUR
+        // 8. FIND BEST YOLO-GUIDED CONTOUR (parallel)
         // ----------------------------------------------------
+
+        const std::vector<cv::Mat> kernels = makeKernels(opt.kernelSizes);
+
+        const double minSide =
+            (scale < 1.0) ? std::max(2.0, 5.0 * scale) : 5.0;
 
         std::vector<cv::Point> selectedContour;
-
-        cv::Mat selectedMask;
-
         int totalContours = 0;
 
         const bool found =
-            findBestYOLOGuidedContour(
-                candidateMasks,
+            findBestYOLOGuidedContourFast(
+                maskPointers(m),
+                kernels,
                 yoloMask,
+                yoloBounds,
+                yoloArea,
                 localYOLOBox,
+                minSide,
+                opt.parallel,
                 selectedContour,
-                selectedMask,
                 totalContours
             );
 
-        result.segmentation.contourCount =
-            totalContours;
+        result.segmentation.contourCount = totalContours;
 
         if (!found)
         {
@@ -1393,48 +1305,51 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
                 "not find a suitable matching contour. "
                 "Inspect the ROI threshold images.";
 
-            return result;
+            return finish();
         }
 
         // ----------------------------------------------------
-        // 12. REFINE CONTOUR
+        // 9. REFINE CONTOUR (same approximation as the original)
         // ----------------------------------------------------
 
-        // Use a small approximation tolerance to preserve
-        // the actual component boundary.
-
-        std::vector<cv::Point> refinedContour;
+        std::vector<cv::Point> refinedContourWork;
 
         const double perimeter =
-            cv::arcLength(
-                selectedContour,
-                true
-            );
+            cv::arcLength(selectedContour, true);
 
         const double epsilon =
-            std::max(
-                0.5,
-                perimeter * 0.0005
-            );
+            std::max(0.5, perimeter * 0.0005);
 
         cv::approxPolyDP(
             selectedContour,
-            refinedContour,
+            refinedContourWork,
             epsilon,
             true
         );
 
-        if (refinedContour.size() < 5)
+        if (refinedContourWork.size() < 5)
+            refinedContourWork = selectedContour;
+
+        // Map back to ROI-local coordinates at ORIGINAL scale.
+        std::vector<cv::Point> refinedContour;
+        refinedContour.reserve(refinedContourWork.size());
+
+        if (scale < 1.0)
         {
-            refinedContour = selectedContour;
+            const double inv = 1.0 / scale;
+
+            for (const cv::Point& p : refinedContourWork)
+            {
+                refinedContour.emplace_back(
+                    cvRound(p.x * inv),
+                    cvRound(p.y * inv)
+                );
+            }
         }
-
-        // ----------------------------------------------------
-        // 13. CALCULATE FINAL REFINED GEOMETRY
-        // ----------------------------------------------------
-
-        // The final rotated bounding box follows the selected
-        // OpenCV contour instead of the original YOLO rectangle.
+        else
+        {
+            refinedContour = refinedContourWork;
+        }
 
         const cv::RotatedRect refinedLocalBox =
             cv::minAreaRect(refinedContour);
@@ -1442,44 +1357,22 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
         const cv::Rect refinedLocalBoundingBox =
             cv::boundingRect(refinedContour);
 
-        // Update ROI-local segmentation results.
+        // ----------------------------------------------------
+        // 10. ROI-LOCAL SEGMENTATION INFO (cheap)
+        // ----------------------------------------------------
 
+        result.segmentation.success = true;
         result.segmentation.outerContourFound = true;
-
-        result.segmentation.outerCableContour =
-            refinedContour;
-
-        result.segmentation.outerBoundingBox =
-            refinedLocalBoundingBox;
-
-        result.segmentation.outerRotatedBoundingBox =
-            refinedLocalBox;
-
-        result.segmentation.outerCableMask =
-            cv::Mat::zeros(
-                roiImage.size(),
-                CV_8UC1
-            );
-
-        const std::vector<std::vector<cv::Point>> refinedLocalContours =
-        {
-            refinedContour
-        };
-
-        cv::drawContours(
-            result.segmentation.outerCableMask,
-            refinedLocalContours,
-            0,
-            cv::Scalar(255),
-            cv::FILLED
-        );
+        result.segmentation.outerCableContour = refinedContour;
+        result.segmentation.outerBoundingBox = refinedLocalBoundingBox;
+        result.segmentation.outerRotatedBoundingBox = refinedLocalBox;
+        result.segmentation.message = "Fast refinement completed.";
 
         // ----------------------------------------------------
-        // 14. CONVERT CONTOUR TO FULL IMAGE COORDINATES
+        // 11. FULL IMAGE COORDINATES
         // ----------------------------------------------------
 
-        result.refinedContour =
-            refinedContour;
+        result.refinedContour = refinedContour;
 
         for (cv::Point& point : result.refinedContour)
         {
@@ -1487,230 +1380,197 @@ OpenCVOnlyGeometry::refineWithinYOLORegion(
             point.y += result.roi.y;
         }
 
-        result.refinedBoundingBox =
-            refinedLocalBoundingBox;
-
+        result.refinedBoundingBox = refinedLocalBoundingBox;
         result.refinedBoundingBox.x += result.roi.x;
         result.refinedBoundingBox.y += result.roi.y;
 
-        result.refinedRotatedBoundingBox =
-            refinedLocalBox;
-
-        result.refinedRotatedBoundingBox.center.x +=
-            static_cast<float>(result.roi.x);
-
-        result.refinedRotatedBoundingBox.center.y +=
-            static_cast<float>(result.roi.y);
-
-        // ----------------------------------------------------
-        // 15. ROI VISUALIZATION
-        // ----------------------------------------------------
-
-        result.roiVisualization =
-            roiImage.clone();
-
-        // Yellow: YOLO reference bounding box.
-        drawRotatedBox(
-            result.roiVisualization,
-            localYOLOBox,
-            cv::Scalar(0, 255, 255),
-            2
-        );
-
-        // Red: refined component contour.
-        cv::drawContours(
-            result.roiVisualization,
-            refinedLocalContours,
-            0,
-            cv::Scalar(0, 0, 255),
-            2,
-            cv::LINE_AA
-        );
-
-        // Blue: refined rotated bounding box.
-        drawRotatedBox(
-            result.roiVisualization,
-            refinedLocalBox,
-            cv::Scalar(255, 0, 0),
-            2
-        );
-
-        // Green: refined centre.
-        cv::circle(
-            result.roiVisualization,
-            refinedLocalBox.center,
-            5,
-            cv::Scalar(0, 255, 0),
-            cv::FILLED
-        );
-
-        saveDiagnostic(
-            outputDirectory,
-            "14_yolo_guided_refinement_roi.png",
-            result.roiVisualization
-        );
-
-        // ----------------------------------------------------
-        // 16. FULL IMAGE VISUALIZATION
-        // ----------------------------------------------------
-
-        result.fullImageVisualization =
-            displaySource.clone();
-
-        // Yellow: original YOLO bounding box.
-        drawRotatedBox(
-            result.fullImageVisualization,
-            yoloBoundingBox,
-            cv::Scalar(0, 255, 255),
-            2
-        );
-
-        // Red: refined component contour.
-        const std::vector<std::vector<cv::Point>> fullContours =
-        {
-            result.refinedContour
-        };
-
-        cv::drawContours(
-            result.fullImageVisualization,
-            fullContours,
-            0,
-            cv::Scalar(0, 0, 255),
-            2,
-            cv::LINE_AA
-        );
-
-        // Blue: final refined bounding box.
-        drawRotatedBox(
-            result.fullImageVisualization,
-            result.refinedRotatedBoundingBox,
-            cv::Scalar(255, 0, 0),
-            2
-        );
-
-        // Green: final centre.
-        cv::circle(
-            result.fullImageVisualization,
-            result.refinedRotatedBoundingBox.center,
-            6,
-            cv::Scalar(0, 255, 0),
-            cv::FILLED
-        );
-
-        saveDiagnostic(
-            outputDirectory,
-            "15_yolo_geometric_final_result.png",
-            result.fullImageVisualization
-        );
-
-        // ----------------------------------------------------
-        // 17. SAVE COMPONENT INFORMATION
-        // ----------------------------------------------------
-
-        if (!outputDirectory.empty())
-        {
-            std::string reportPath = outputDirectory;
-
-            if (reportPath.back() != '/' &&
-                reportPath.back() != '\\')
-            {
-                reportPath += '/';
-            }
-
-            reportPath +=
-                "16_yolo_geometric_information.txt";
-
-            std::ofstream report(reportPath);
-
-            if (report.is_open())
-            {
-                report << "YOLO + GEOMETRIC REFINEMENT\n\n";
-
-                report << "YOLO centre X: "
-                    << yoloBoundingBox.center.x << '\n';
-
-                report << "YOLO centre Y: "
-                    << yoloBoundingBox.center.y << '\n';
-
-                report << "YOLO width: "
-                    << yoloBoundingBox.size.width << '\n';
-
-                report << "YOLO height: "
-                    << yoloBoundingBox.size.height << '\n';
-
-                report << "YOLO angle: "
-                    << yoloBoundingBox.angle << '\n';
-
-                report << "\nREFINED GEOMETRY\n\n";
-
-                report << "Refined contour points: "
-                    << result.refinedContour.size() << '\n';
-
-                report << "Refined centre X: "
-                    << result.refinedRotatedBoundingBox.center.x
-                    << '\n';
-
-                report << "Refined centre Y: "
-                    << result.refinedRotatedBoundingBox.center.y
-                    << '\n';
-
-                report << "Refined width: "
-                    << result.refinedRotatedBoundingBox.size.width
-                    << '\n';
-
-                report << "Refined height: "
-                    << result.refinedRotatedBoundingBox.size.height
-                    << '\n';
-
-                report << "Refined angle: "
-                    << result.refinedRotatedBoundingBox.angle
-                    << '\n';
-
-                report << "Contours examined: "
-                    << totalContours << '\n';
-            }
-        }
-       
-        // ----------------------------------------------------
-        // 18. FINISH
-        // ----------------------------------------------------
+        result.refinedRotatedBoundingBox = refinedLocalBox;
+        result.refinedRotatedBoundingBox.center.x += static_cast<float>(result.roi.x);
+        result.refinedRotatedBoundingBox.center.y += static_cast<float>(result.roi.y);
 
         result.refinedContourFound = true;
         result.success = true;
+        result.message = "YOLO detection and geometric refinement completed.";
 
-        result.message =
-            "YOLO detection and geometric refinement completed.";
+        // ----------------------------------------------------
+        // 12. OPTIONAL VISUALIZATIONS / DISK OUTPUT (slow)
+        // ----------------------------------------------------
 
-        return result;
+        if (opt.buildVisualizations || opt.saveDiagnostics)
+        {
+            cv::Mat displaySource;
+
+            if (toBgrCopy(bgrImage, displaySource))
+            {
+                const cv::Mat roiImage = displaySource(result.roi).clone();
+
+                cv::RotatedRect drawYOLOBox = yoloBoundingBox;
+                drawYOLOBox.center.x -= static_cast<float>(result.roi.x);
+                drawYOLOBox.center.y -= static_cast<float>(result.roi.y);
+
+                const std::vector<std::vector<cv::Point>> refinedLocalContours =
+                {
+                    refinedContour
+                };
+
+                result.segmentation.outerCableMask =
+                    cv::Mat::zeros(roiImage.size(), CV_8UC1);
+
+                cv::drawContours(
+                    result.segmentation.outerCableMask,
+                    refinedLocalContours,
+                    0,
+                    cv::Scalar(255),
+                    cv::FILLED
+                );
+
+                result.segmentation.grayImage = workGray;
+                result.segmentation.enhancedImage = m.enhanced;
+                result.segmentation.otsuNormalMask = m.otsuNormal;
+                result.segmentation.otsuInverseMask = m.otsuInverse;
+                result.segmentation.adaptiveNormalMask = m.adaptiveNormal;
+                result.segmentation.adaptiveInverseMask = m.adaptiveInverse;
+                result.segmentation.adaptiveInverseC2Mask = m.adaptiveInverseC2;
+
+                result.roiVisualization = roiImage.clone();
+
+                drawRotatedBox(result.roiVisualization, drawYOLOBox, cv::Scalar(0, 255, 255), 2);
+
+                cv::drawContours(
+                    result.roiVisualization,
+                    refinedLocalContours,
+                    0,
+                    cv::Scalar(0, 0, 255),
+                    2,
+                    cv::LINE_AA
+                );
+
+                drawRotatedBox(result.roiVisualization, refinedLocalBox, cv::Scalar(255, 0, 0), 2);
+
+                cv::circle(
+                    result.roiVisualization,
+                    refinedLocalBox.center,
+                    5,
+                    cv::Scalar(0, 255, 0),
+                    cv::FILLED
+                );
+
+                result.fullImageVisualization = displaySource;
+
+                drawRotatedBox(result.fullImageVisualization, yoloBoundingBox, cv::Scalar(0, 255, 255), 2);
+
+                const std::vector<std::vector<cv::Point>> fullContours =
+                {
+                    result.refinedContour
+                };
+
+                cv::drawContours(
+                    result.fullImageVisualization,
+                    fullContours,
+                    0,
+                    cv::Scalar(0, 0, 255),
+                    2,
+                    cv::LINE_AA
+                );
+
+                drawRotatedBox(
+                    result.fullImageVisualization,
+                    result.refinedRotatedBoundingBox,
+                    cv::Scalar(255, 0, 0),
+                    2
+                );
+
+                cv::circle(
+                    result.fullImageVisualization,
+                    result.refinedRotatedBoundingBox.center,
+                    6,
+                    cv::Scalar(0, 255, 0),
+                    cv::FILLED
+                );
+            }
+
+            if (opt.saveDiagnostics && !opt.outputDirectory.empty())
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(opt.outputDirectory, ec);
+
+                saveFast(opt.outputDirectory, "01_grayscale.png", workGray);
+                saveFast(opt.outputDirectory, "02_enhanced.png", m.enhanced);
+                saveFast(opt.outputDirectory, "03_otsu_normal.png", m.otsuNormal);
+                saveFast(opt.outputDirectory, "04_otsu_inverse.png", m.otsuInverse);
+                saveFast(opt.outputDirectory, "05_adaptive_normal.png", m.adaptiveNormal);
+                saveFast(opt.outputDirectory, "06_adaptive_inverse.png", m.adaptiveInverse);
+                saveFast(opt.outputDirectory, "07_adaptive_inverse_c2.png", m.adaptiveInverseC2);
+                saveFast(opt.outputDirectory, "14_yolo_guided_refinement_roi.png", result.roiVisualization);
+                saveFast(opt.outputDirectory, "15_yolo_geometric_final_result.png", result.fullImageVisualization);
+
+                std::ofstream report(
+                    (std::filesystem::path(opt.outputDirectory) /
+                        "16_yolo_geometric_information.txt").string()
+                );
+
+                if (report.is_open())
+                {
+                    report << "YOLO + GEOMETRIC REFINEMENT\n\n";
+                    report << "YOLO centre X: " << yoloBoundingBox.center.x << '\n';
+                    report << "YOLO centre Y: " << yoloBoundingBox.center.y << '\n';
+                    report << "YOLO width: " << yoloBoundingBox.size.width << '\n';
+                    report << "YOLO height: " << yoloBoundingBox.size.height << '\n';
+                    report << "YOLO angle: " << yoloBoundingBox.angle << '\n';
+                    report << "\nREFINED GEOMETRY\n\n";
+                    report << "Refined contour points: " << result.refinedContour.size() << '\n';
+                    report << "Refined centre X: " << result.refinedRotatedBoundingBox.center.x << '\n';
+                    report << "Refined centre Y: " << result.refinedRotatedBoundingBox.center.y << '\n';
+                    report << "Refined width: " << result.refinedRotatedBoundingBox.size.width << '\n';
+                    report << "Refined height: " << result.refinedRotatedBoundingBox.size.height << '\n';
+                    report << "Refined angle: " << result.refinedRotatedBoundingBox.angle << '\n';
+                    report << "Contours examined: " << totalContours << '\n';
+                }
+            }
+        }
+
+        return finish();
     }
     catch (const cv::Exception& e)
     {
         result.success = false;
         result.refinedContourFound = false;
-
-        result.message =
-            std::string("OpenCV exception: ") + e.what();
-
-        return result;
+        result.message = std::string("OpenCV exception: ") + e.what();
+        return finish();
     }
     catch (const std::exception& e)
     {
         result.success = false;
         result.refinedContourFound = false;
-
-        result.message =
-            std::string("Processing exception: ") + e.what();
-
-        return result;
+        result.message = std::string("Processing exception: ") + e.what();
+        return finish();
     }
     catch (...)
     {
         result.success = false;
         result.refinedContourFound = false;
-
-        result.message =
-            "Unknown error during YOLO geometric refinement.";
-
-        return result;
+        result.message = "Unknown error during YOLO geometric refinement.";
+        return finish();
     }
+}
+
+// ============================================================
+// OLD SIGNATURE: refineWithinYOLORegion(image, box, dir, padding)
+// ============================================================
+
+YOLOGuidedRefinementResult
+OpenCVOnlyGeometry::refineWithinYOLORegion(
+    const cv::Mat& bgrImage,
+    const cv::RotatedRect& yoloBoundingBox,
+    const std::string& outputDirectory,
+    float paddingRatio)
+{
+    RefinementOptions opt;
+
+    opt.paddingRatio = paddingRatio;
+    opt.saveDiagnostics = !outputDirectory.empty();
+    opt.buildVisualizations = !outputDirectory.empty();
+    opt.outputDirectory = outputDirectory;
+
+    return refineWithinYOLORegion(bgrImage, yoloBoundingBox, opt);
 }
