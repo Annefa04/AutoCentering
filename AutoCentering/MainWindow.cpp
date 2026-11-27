@@ -58,7 +58,7 @@ namespace
     //   Step 2/3 : the component is detected (box + centre are shown)
     //   Step 3/3 : the image rotates / shifts to the centre
     // Set kBatchAnimationMs to 0 to skip ALL steps (fastest batch).
-    constexpr int kBatchStepImageMs = 400;  // Step 1: pause on the loaded image
+    constexpr int kBatchStepImageMs = 1500 ;  // Step 1: pause on the loaded image
     constexpr int kBatchStepDetectMs = 1500;  // Step 2: pause on the detection
     constexpr int kBatchAnimationMs = 1000;  // Step 3: centering movement
     constexpr int kBatchStepFinalMs = 1500;  // pause on the result, then next image
@@ -286,7 +286,7 @@ namespace
 
         return correction;
     }
-
+    
     // Draw a rotated rectangle.
     void drawRotatedBox(
         cv::Mat& image,
@@ -345,6 +345,7 @@ AutoCentering::AutoCentering(QWidget* parent)
     ui.lblimagetitle->setAlignment(
         Qt::AlignLeft | Qt::AlignVCenter
     );
+
 
     // LOAD DARK THEME
     QFile styleFile(":/styles/dark_minimal.qss");
@@ -494,7 +495,7 @@ AutoCentering::AutoCentering(QWidget* parent)
     // ========================================================
     // HYBRID COMPLETION
     // ========================================================
-
+  
     connect(
         hybridWatcher,
         &QFutureWatcher<YOLOGuidedRefinementResult>::finished,
